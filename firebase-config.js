@@ -5,12 +5,12 @@
 //  (fichier firestore.rules) qui protègent tes données.
 // ─────────────────────────────────────────────────────────────
 export const firebaseConfig = {
-  apiKey: "VOTRE_API_KEY",
-  authDomain: "VOTRE_PROJET.firebaseapp.com",
-  projectId: "VOTRE_PROJET",
-  storageBucket: "VOTRE_PROJET.firebasestorage.app",
-  messagingSenderId: "VOTRE_SENDER_ID",
-  appId: "VOTRE_APP_ID",
+  apiKey: "AIzaSyDz2YEru-u76xwLzn6LWvi8vKWhiGplRik",
+  authDomain: "noel-whishlist.firebaseapp.com",
+  projectId: "noel-whishlist",
+  storageBucket: "noel-whishlist.firebasestorage.app",
+  messagingSenderId: "709351505120",
+  appId: "1:709351505120:web:7fdb7f3fd78a7c1c002485",
 };
 
 // ─────────────────────────────────────────────────────────────
