@@ -1,0 +1,122 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Membre d'une liste = possède un document lists/{id}/members/{son uid}
+    function isMember(listId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/lists/$(listId)/members/$(request.auth.uid));
+    }
+
+    // Suis-je le parent (gestionnaire) de ce profil enfant ?
+    function manages(listId, childId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/lists/$(listId)/members/$(childId))
+        && request.auth.uid in get(/databases/$(database)/documents/lists/$(listId)/members/$(childId)).data.get('managerIds', []);
+    }
+
+    // Puis-je écrire les cadeaux de cette personne ? (moi, ou l'enfant dont je m'occupe)
+    function canActFor(listId, ownerId) {
+      return signedIn() && (ownerId == request.auth.uid || manages(listId, ownerId));
+    }
+
+    // Profil + index personnel de mes listes : privés
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+
+      match /myLists/{listId} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    match /lists/{listId} {
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow read: if isMember(listId);
+      allow update: if isMember(listId) && resource.data.ownerId == request.auth.uid;
+
+      // Rejoindre = créer son propre document membre.
+      // Le code de la liste EST l'identifiant de la liste : sans lui, impossible de la trouver.
+      // Un profil enfant (identifiant « c_… ») est créé par un membre, qui en devient le gestionnaire.
+      match /members/{uid} {
+        allow read: if isMember(listId) || (signedIn() && request.auth.uid == uid);
+        allow create: if signedIn() && (
+          (request.auth.uid == uid
+            && exists(/databases/$(database)/documents/lists/$(listId)))
+          || (isMember(listId)
+            && uid.matches('^c_.*')
+            && request.resource.data.uid == uid
+            && request.resource.data.kind == 'child'
+            && request.resource.data.managerIds == [request.auth.uid])
+        );
+        allow update: if signedIn()
+          && (request.auth.uid == uid || manages(listId, uid))
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['notify', 'name']);
+        allow delete: if signedIn() && (request.auth.uid == uid || manages(listId, uid));
+      }
+
+      // Les cadeaux souhaités : visibles par tous les membres,
+      // modifiables par leur propriétaire (ou par le parent, pour un enfant)
+      match /gifts/{giftId} {
+        allow read: if isMember(listId);
+        allow create: if isMember(listId)
+          && canActFor(listId, request.resource.data.ownerId)
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isMember(listId)
+          && canActFor(listId, resource.data.ownerId)
+          && request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isMember(listId) && canActFor(listId, resource.data.ownerId);
+      }
+
+      // Les achats : JAMAIS lisibles par la personne à qui le cadeau est destiné.
+      // Rangés par destinataire (purchases/{destinataire}/items/…) : la règle porte sur
+      // le chemin lui-même, donc impossible pour le destinataire de lire ce dossier.
+      // Un enfant n'a pas de compte : son parent peut donc tout voir.
+      match /purchases/{ownerUid}/items/{docId} {
+        allow read: if isMember(listId) && ownerUid != request.auth.uid;
+
+        allow create: if isMember(listId)
+          && ownerUid != request.auth.uid
+          && (
+            // « Je l'achète » ou début d'un cadeau à plusieurs (document nommé comme le cadeau)
+            (request.resource.data.kind == 'buy'
+              && request.resource.data.boughtBy == request.auth.uid
+              && get(/databases/$(database)/documents/lists/$(listId)/gifts/$(docId)).data.ownerId == ownerUid)
+            // « Je participe » à un cadeau à plusieurs
+            || (request.resource.data.kind == 'join'
+              && request.resource.data.uid == request.auth.uid
+              && docId == request.resource.data.giftId + '__' + request.auth.uid
+              && get(/databases/$(database)/documents/lists/$(listId)/purchases/$(ownerUid)/items/$(request.resource.data.giftId)).data.get('group', false) == true
+              && get(/databases/$(database)/documents/lists/$(listId)/purchases/$(ownerUid)/items/$(request.resource.data.giftId)).data.gid == request.resource.data.gid)
+          );
+
+        // L'organisateur d'un cadeau à plusieurs peut seulement le marquer « acheté »
+        allow update: if isMember(listId)
+          && resource.data.get('boughtBy', '') == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['done']);
+
+        allow delete: if isMember(listId)
+          && (resource.data.get('boughtBy', '') == request.auth.uid
+              || resource.data.get('uid', '') == request.auth.uid);
+      }
+
+      // Idées secrètes et commentaires : visibles par tous SAUF la personne concernée
+      // (même principe que les achats : la règle porte sur le chemin).
+      match /secret/{targetUid}/items/{noteId} {
+        allow read: if isMember(listId) && targetUid != request.auth.uid;
+        allow create: if isMember(listId)
+          && targetUid != request.auth.uid
+          && request.resource.data.addedBy == request.auth.uid
+          && request.resource.data.kind in ['idea', 'comment'];
+        allow update: if isMember(listId)
+          && resource.data.addedBy == request.auth.uid
+          && request.resource.data.addedBy == request.auth.uid;
+        allow delete: if isMember(listId) && resource.data.addedBy == request.auth.uid;
+      }
+    }
+  }
+}
