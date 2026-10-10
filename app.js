@@ -787,46 +787,32 @@ function todoHtml() {
     ${closed.length ? `<h3 class="subhead">Déjà achetés (${closed.length})</h3><div class="todo">${closed.map(todoRow).join("")}</div>` : ""}`;
 }
 
-// Combien chacun a dépensé (ou compte dépenser) pour offrir des cadeaux.
-// Un cadeau à plusieurs partage son prix à parts égales entre l'organisateur et les participants.
-// Note : ce que les autres T'offrent reste invisible (comme partout ailleurs dans l'appli),
-// donc ton propre total ici ne compte que ce que TOI tu as offert aux autres.
+// Ce que TOI tu as dépensé (ou comptes dépenser), détaillé par destinataire.
+// Un cadeau à plusieurs ne compte que ta part (prix total divisé par le nombre de participants).
 function budgetByPerson() {
-  const totals = new Map(); // uid -> { uid, name, spent, pending }
-  const add = (uid, name, amount, done) => {
-    if (!totals.has(uid)) totals.set(uid, { uid, name, spent: 0, pending: 0 });
-    const t = totals.get(uid);
-    if (name) t.name = name;
-    if (done) t.spent += amount; else t.pending += amount;
-  };
-  for (const [giftId, p] of state.purchases) {
-    const g = giftById(giftId);
-    if (!g) continue;
-    const done = isDone(p);
+  const totals = new Map(); // recipientUid -> { uid, name, spent, pending }
+  for (const { g, p, done } of myPurchaseItems()) {
     const estimate = typeof g.price === "number" ? g.price : 0;
-    if (!p.group) {
-      const amount = done ? (typeof p.actualPrice === "number" ? p.actualPrice : estimate) : estimate;
-      add(p.boughtBy, nameOf(p.boughtBy, p.boughtByName), amount, done);
-    } else {
-      const joins = (state.joins.get(giftId) || []).filter((j) => j.gid === p.gid);
-      const participants = [{ uid: p.boughtBy, name: p.boughtByName }, ...joins.map((j) => ({ uid: j.uid, name: j.name }))];
-      const totalAmount = done ? (typeof p.actualPrice === "number" ? p.actualPrice : estimate) : estimate;
-      const share = totalAmount / (participants.length || 1);
-      for (const part of participants) add(part.uid, nameOf(part.uid, part.name), share, done);
-    }
+    const totalAmount = done ? (typeof p.actualPrice === "number" ? p.actualPrice : estimate) : estimate;
+    const share = p.group
+      ? totalAmount / (1 + (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).length)
+      : totalAmount;
+    const uid = g.ownerId;
+    if (!totals.has(uid)) totals.set(uid, { uid, name: nameOf(uid, g.ownerName), spent: 0, pending: 0 });
+    const t = totals.get(uid);
+    if (done) t.spent += share; else t.pending += share;
   }
-  return [...totals.values()].filter((t) => t.spent || t.pending)
+  return [...totals.values()]
     .sort((a, b) => (b.spent + b.pending) - (a.spent + a.pending) || String(a.name).localeCompare(String(b.name), "fr"));
 }
 
 function budgetRow(t, max) {
-  const me = myUid();
   const total = t.spent + t.pending;
   const pctSpent = max ? Math.round((t.spent / max) * 100) : 0;
   const pctPending = max ? Math.round((t.pending / max) * 100) : 0;
   return `<div class="budget-row">
     <div class="budget-head">
-      <span class="budget-name">${t.uid === me ? "Toi" : esc(t.name)}</span>
+      <span class="budget-name">${esc(t.name)}</span>
       <span class="budget-total">${esc(priceFmt.format(total))}</span>
     </div>
     <div class="progress budget-bar" role="img" aria-label="${esc(priceFmt.format(t.spent))} dépensés${t.pending ? `, ${esc(priceFmt.format(t.pending))} estimés en cours` : ""}">
@@ -840,15 +826,15 @@ function budgetRow(t, max) {
 function budgetHtml() {
   const rows = budgetByPerson();
   if (!rows.length) {
-    return `<div class="section-head"><h2>💰 Budgets</h2></div>
+    return `<div class="section-head"><h2>💰 Mon budget</h2></div>
       <div class="empty"><span class="big">💶</span><strong>Rien à afficher pour l'instant</strong>
-        Dès que quelqu'un prend un cadeau en charge, son budget apparaît ici.</div>`;
+        Dès que tu prends un cadeau en charge, ton budget pour cette personne apparaît ici.</div>`;
   }
   const max = Math.max(...rows.map((t) => t.spent + t.pending));
   const grandSpent = rows.reduce((s, t) => s + t.spent, 0);
   const grandPending = rows.reduce((s, t) => s + t.pending, 0);
-  return `<div class="section-head"><h2>💰 Budgets</h2></div>
-    <p class="hint">Ce que chacun a dépensé (ou compte dépenser) pour offrir des cadeaux. Ce que toi tu reçois reste bien entendu secret, même ici.</p>
+  return `<div class="section-head"><h2>💰 Mon budget</h2></div>
+    <p class="hint">Ce que TOI tu as dépensé (ou comptes dépenser) pour chaque personne, cadeaux à plusieurs comptés pour ta part seulement.</p>
     <p class="hint">Total : ${esc(priceFmt.format(grandSpent))} dépensés${grandPending ? ` · ≈ ${esc(priceFmt.format(grandPending))} en cours` : ""}</p>
     <div class="budgets">${rows.map((t) => budgetRow(t, max)).join("")}</div>`;
 }
@@ -930,7 +916,7 @@ function renderList() {
     <div class="people" role="group" aria-label="Personnes de la liste">
       <button class="chip chip-todo" data-action="pick-person" data-uid="${TODO}" aria-pressed="${todoMode}">🛍️ <span>Mes achats</span>
         ${openCount ? `<span class="dot">${openCount}</span>` : ""}</button>
-      <button class="chip chip-todo" data-action="pick-person" data-uid="${BUDGET}" aria-pressed="${budgetMode}">💰 <span>Budgets</span></button>
+      <button class="chip chip-todo" data-action="pick-person" data-uid="${BUDGET}" aria-pressed="${budgetMode}">💰 <span>Mon budget</span></button>
       ${ordered.map(chip).join("")}
       <button class="chip chip-add" data-action="add-child">🧸 ＋ Enfant</button>
     </div>
