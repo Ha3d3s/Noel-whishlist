@@ -410,6 +410,21 @@ textarea.input { min-height: 84px; resize: vertical; }
 .todo-name { font-family: var(--font-display); font-weight: 700; font-size: 1.1rem; overflow-wrap: anywhere; }
 .todo-row.is-done .todo-name { text-decoration: line-through; color: var(--ink-soft); }
 .todo-row.is-done { opacity: .75; }
+
+/* ── Budgets ── */
+.budgets { display: grid; gap: 14px; }
+.budget-row {
+  background: var(--paper); border-radius: var(--r-card);
+  padding: 12px 14px; box-shadow: 0 3px 0 var(--line);
+}
+.budget-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.budget-name { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; }
+.budget-total { font-weight: 700; color: var(--pine); }
+.budget-bar { position: relative; margin: 0 0 6px; }
+.budget-bar .bar { position: absolute; top: 0; }
+.budget-bar .bar-spent { background: var(--pine); }
+.budget-bar .bar-pending { background: var(--butter); }
+.budget-detail { margin: 0; }
 .check { width: 28px; height: 28px; margin: 2px 0 0; flex: none; accent-color: var(--pine); cursor: pointer; }
 .check:disabled { cursor: default; opacity: .5; }
 .opt .grow { min-width: 0; overflow-wrap: anywhere; }
