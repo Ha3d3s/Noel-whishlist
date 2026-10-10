@@ -647,7 +647,10 @@ function purchaseZone(g) {
     ? `<span class="spacer"></span><button class="btn btn-ghost btn-small" data-action="undo-done" data-id="${id}">Décocher</button>` : "";
 
   if (!p.group) {
-    if (done) return `<div class="gift-foot"><span class="status">✅ Acheté par ${iAmOrganiser ? "toi" : esc(who)}</span>${undo}</div>`;
+    if (done) {
+      const priceTag = typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))}` : "";
+      return `<div class="gift-foot"><span class="status">✅ Acheté par ${iAmOrganiser ? "toi" : esc(who)}${priceTag}</span>${undo}</div>`;
+    }
     return iAmOrganiser
       ? `<div class="status pool">🛍️ Tu le prends</div>
          <div class="gift-foot"><button class="btn btn-primary btn-small" data-action="mark-done" data-id="${id}">✅ C'est acheté</button>
@@ -660,7 +663,10 @@ function purchaseZone(g) {
   const label = (uid, name, organiser) => `${uid === me ? "toi" : esc(nameOf(uid, name))}${organiser ? " (organise)" : ""}`;
   const names = [label(p.boughtBy, p.boughtByName, true), ...joins.map((j) => label(j.uid, j.name, false))].join(", ");
   const iJoined = joins.some((j) => j.uid === me);
-  if (done) return `<div class="gift-foot"><span class="status">✅ Acheté à plusieurs : ${names}</span>${undo}</div>`;
+  if (done) {
+    const priceTag = typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))} au total` : "";
+    return `<div class="gift-foot"><span class="status">✅ Acheté à plusieurs : ${names}${priceTag}</span>${undo}</div>`;
+  }
   return `<div class="status pool">👥 On l'offre à plusieurs : ${names}</div>
     <div class="gift-foot">${iAmOrganiser
       ? `<button class="btn btn-primary btn-small" data-action="mark-done" data-id="${id}">✅ C'est acheté</button>
@@ -714,6 +720,7 @@ function ideaCard(n) {
 }
 
 const TODO = "__todo";
+const BUDGET = "__budget";
 
 function orderedMembers() {
   const me = myUid();
@@ -741,19 +748,20 @@ function myPurchaseItems() {
 function todoRow({ g, p, role, done }) {
   const link = normalizeUrl(g.url);
   const recipient = memberOf(g.ownerId);
-  let note = "";
+  const tags = [];
   if (p.group) {
     const others = (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).map((j) => esc(nameOf(j.uid, j.name)));
-    note = role === "buyer"
+    tags.push(`<span class="tag">${role === "buyer"
       ? (others.length ? `👥 À plusieurs avec ${others.join(", ")}` : "👥 À plusieurs")
-      : `👥 Organisé par ${esc(nameOf(p.boughtBy, p.boughtByName))}`;
+      : `👥 Organisé par ${esc(nameOf(p.boughtBy, p.boughtByName))}`}</span>`);
   }
+  if (done && typeof p.actualPrice === "number") tags.push(`<span class="tag tag-price">✅ ${esc(priceFmt.format(p.actualPrice))}${p.group ? " au total" : ""}</span>`);
   return `<div class="todo-row${done ? " is-done" : ""}">
     <input class="check" type="checkbox" data-action="toggle-done" data-id="${esc(g.id)}"${done ? " checked" : ""}${role === "joiner" ? " disabled" : ""} aria-label="Acheté : ${esc(g.name)}">
     <div class="grow todo-main">
       <div class="todo-name">${esc(g.name)}</div>
       <div class="muted small">pour ${isChild(recipient) ? "🧸 " : ""}${esc(nameOf(g.ownerId, g.ownerName))}</div>
-      ${tagsHtml(g, note ? `<span class="tag">${note}</span>` : "")}
+      ${tagsHtml(g, tags.join(""))}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
     </div>
     <button class="icon-btn icon-btn-small" data-action="${role === "joiner" ? "leave-pool" : "unbuy"}" data-confirm="1" data-id="${esc(g.id)}"
@@ -777,6 +785,72 @@ function todoHtml() {
     <p class="hint">${closed.length} sur ${items.length} acheté${closed.length > 1 ? "s" : ""}${total ? ` · reste environ ${esc(priceFmt.format(total))}${hasGroup ? " (hors cadeaux à plusieurs)" : ""}` : ""}</p>
     ${open.length ? `<h3 class="subhead">À acheter (${open.length})</h3><div class="todo">${open.map(todoRow).join("")}</div>` : `<div class="secret-note calm">🎉 Tout est acheté, bravo !</div>`}
     ${closed.length ? `<h3 class="subhead">Déjà achetés (${closed.length})</h3><div class="todo">${closed.map(todoRow).join("")}</div>` : ""}`;
+}
+
+// Combien chacun a dépensé (ou compte dépenser) pour offrir des cadeaux.
+// Un cadeau à plusieurs partage son prix à parts égales entre l'organisateur et les participants.
+// Note : ce que les autres T'offrent reste invisible (comme partout ailleurs dans l'appli),
+// donc ton propre total ici ne compte que ce que TOI tu as offert aux autres.
+function budgetByPerson() {
+  const totals = new Map(); // uid -> { uid, name, spent, pending }
+  const add = (uid, name, amount, done) => {
+    if (!totals.has(uid)) totals.set(uid, { uid, name, spent: 0, pending: 0 });
+    const t = totals.get(uid);
+    if (name) t.name = name;
+    if (done) t.spent += amount; else t.pending += amount;
+  };
+  for (const [giftId, p] of state.purchases) {
+    const g = giftById(giftId);
+    if (!g) continue;
+    const done = isDone(p);
+    const estimate = typeof g.price === "number" ? g.price : 0;
+    if (!p.group) {
+      const amount = done ? (typeof p.actualPrice === "number" ? p.actualPrice : estimate) : estimate;
+      add(p.boughtBy, nameOf(p.boughtBy, p.boughtByName), amount, done);
+    } else {
+      const joins = (state.joins.get(giftId) || []).filter((j) => j.gid === p.gid);
+      const participants = [{ uid: p.boughtBy, name: p.boughtByName }, ...joins.map((j) => ({ uid: j.uid, name: j.name }))];
+      const totalAmount = done ? (typeof p.actualPrice === "number" ? p.actualPrice : estimate) : estimate;
+      const share = totalAmount / (participants.length || 1);
+      for (const part of participants) add(part.uid, nameOf(part.uid, part.name), share, done);
+    }
+  }
+  return [...totals.values()].filter((t) => t.spent || t.pending)
+    .sort((a, b) => (b.spent + b.pending) - (a.spent + a.pending) || String(a.name).localeCompare(String(b.name), "fr"));
+}
+
+function budgetRow(t, max) {
+  const me = myUid();
+  const total = t.spent + t.pending;
+  const pctSpent = max ? Math.round((t.spent / max) * 100) : 0;
+  const pctPending = max ? Math.round((t.pending / max) * 100) : 0;
+  return `<div class="budget-row">
+    <div class="budget-head">
+      <span class="budget-name">${t.uid === me ? "Toi" : esc(t.name)}</span>
+      <span class="budget-total">${esc(priceFmt.format(total))}</span>
+    </div>
+    <div class="progress budget-bar" role="img" aria-label="${esc(priceFmt.format(t.spent))} dépensés${t.pending ? `, ${esc(priceFmt.format(t.pending))} estimés en cours` : ""}">
+      ${t.spent ? `<div class="bar bar-spent" style="width:${pctSpent}%"></div>` : ""}
+      ${t.pending ? `<div class="bar bar-pending" style="width:${pctPending}%;left:${pctSpent}%"></div>` : ""}
+    </div>
+    <p class="muted small budget-detail">${t.spent ? `✅ ${esc(priceFmt.format(t.spent))} dépensés` : "Rien d'acheté pour l'instant"}${t.pending ? ` · 🛍️ ≈ ${esc(priceFmt.format(t.pending))} en cours` : ""}</p>
+  </div>`;
+}
+
+function budgetHtml() {
+  const rows = budgetByPerson();
+  if (!rows.length) {
+    return `<div class="section-head"><h2>💰 Budgets</h2></div>
+      <div class="empty"><span class="big">💶</span><strong>Rien à afficher pour l'instant</strong>
+        Dès que quelqu'un prend un cadeau en charge, son budget apparaît ici.</div>`;
+  }
+  const max = Math.max(...rows.map((t) => t.spent + t.pending));
+  const grandSpent = rows.reduce((s, t) => s + t.spent, 0);
+  const grandPending = rows.reduce((s, t) => s + t.pending, 0);
+  return `<div class="section-head"><h2>💰 Budgets</h2></div>
+    <p class="hint">Ce que chacun a dépensé (ou compte dépenser) pour offrir des cadeaux. Ce que toi tu reçois reste bien entendu secret, même ici.</p>
+    <p class="hint">Total : ${esc(priceFmt.format(grandSpent))} dépensés${grandPending ? ` · ≈ ${esc(priceFmt.format(grandPending))} en cours` : ""}</p>
+    <div class="budgets">${rows.map((t) => budgetRow(t, max)).join("")}</div>`;
 }
 
 function personHtml(person) {
@@ -824,7 +898,8 @@ function renderList() {
   const me = myUid();
   const ordered = orderedMembers();
   const todoMode = state.selectedUid === TODO;
-  const person = todoMode ? null : (ordered.find((m) => m.uid === state.selectedUid) || ordered.find((m) => m.uid === me) || ordered[0]);
+  const budgetMode = state.selectedUid === BUDGET;
+  const person = (todoMode || budgetMode) ? null : (ordered.find((m) => m.uid === state.selectedUid) || ordered.find((m) => m.uid === me) || ordered[0]);
   const scrollX = document.querySelector(".people")?.scrollLeft || 0;
   const carPos = new Map();
   $app.querySelectorAll(".carousel").forEach((c) => {
@@ -834,7 +909,7 @@ function renderList() {
 
   const chip = (m) => {
     const n = state.gifts.filter((g) => g.ownerId === m.uid && isNewGift(g)).length;
-    return `<button class="chip" data-action="pick-person" data-uid="${esc(m.uid)}" aria-pressed="${!todoMode && m.uid === person.uid}">
+    return `<button class="chip" data-action="pick-person" data-uid="${esc(m.uid)}" aria-pressed="${!todoMode && !budgetMode && m.uid === person.uid}">
       ${avatar(m.uid, m.name, m.kind)}<span>${m.uid === me ? "Moi" : esc(m.name)}</span>
       ${n ? `<span class="dot" title="${n} nouveau${n > 1 ? "x" : ""}">${n}</span>` : ""}</button>`;
   };
@@ -855,11 +930,12 @@ function renderList() {
     <div class="people" role="group" aria-label="Personnes de la liste">
       <button class="chip chip-todo" data-action="pick-person" data-uid="${TODO}" aria-pressed="${todoMode}">🛍️ <span>Mes achats</span>
         ${openCount ? `<span class="dot">${openCount}</span>` : ""}</button>
+      <button class="chip chip-todo" data-action="pick-person" data-uid="${BUDGET}" aria-pressed="${budgetMode}">💰 <span>Budgets</span></button>
       ${ordered.map(chip).join("")}
       <button class="chip chip-add" data-action="add-child">🧸 ＋ Enfant</button>
     </div>
 
-    ${todoMode ? todoHtml() : personHtml(person)}`;
+    ${todoMode ? todoHtml() : budgetMode ? budgetHtml() : personHtml(person)}`;
 
   const people = document.querySelector(".people");
   if (people) people.scrollLeft = scrollX;
@@ -1433,6 +1509,30 @@ async function copyText(text) {
 }
 const joinUrl = () => `${location.origin}${location.pathname}#/rejoindre/${state.listId}`;
 
+// Petite fenêtre pour confirmer le prix réellement payé, au moment où on coche « acheté »
+function openPriceModal(g, { group = false } = {}, onConfirm) {
+  const p = state.purchases.get(g.id);
+  const prefill = typeof p?.actualPrice === "number" ? p.actualPrice
+    : (typeof g.price === "number" ? g.price : null);
+  openModal(`
+    <h2>C'est acheté ! 🎉</h2>
+    <form class="stack" id="price-form">
+      <div class="field"><label for="pr-price">Prix réellement payé${group ? " (au total)" : ""} en € <span class="muted">(facultatif)</span></label>
+        <input class="input" id="pr-price" inputmode="decimal" placeholder="25" value="${prefill != null ? esc(String(prefill).replace(".", ",")) : ""}"></div>
+      <span class="hint">${typeof g.price === "number" ? `Prix estimé au départ : ${esc(priceFmt.format(g.price))}. ` : ""}Sert juste à suivre le budget de chacun : laisse vide si tu préfères ne pas le préciser.</span>
+      <div class="btns"><button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>
+        <button class="btn btn-primary" type="submit">Valider ✅</button></div>
+    </form>`, (m) => {
+    m.querySelector("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const price = parsePrice(m.querySelector("#pr-price").value);
+      e.submitter && (e.submitter.disabled = true);
+      try { await onConfirm(price); closeModal(); }
+      catch (err) { toast(friendlyError(err)); e.submitter && (e.submitter.disabled = false); }
+    });
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Actions (boutons marqués data-action)
 // ─────────────────────────────────────────────────────────────
@@ -1504,11 +1604,13 @@ const actions = {
     try { await deleteDoc(purchaseRef(g, `${g.id}__${myUid()}`)); }
     catch (err) { toast(friendlyError(err)); }
   },
-  "mark-done": async (el) => {
-    const g = giftById(el.dataset.id);
+  "mark-done": (el) => {
+    const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g) return;
-    try { await updateDoc(purchaseRef(g), { done: true }); toast("Bravo, c'est acheté ! 🎉"); }
-    catch (err) { toast(friendlyError(err)); }
+    openPriceModal(g, { group: !!p?.group }, async (price) => {
+      await updateDoc(purchaseRef(g), { done: true, actualPrice: price });
+      toast("Bravo, c'est acheté ! 🎉");
+    });
   },
   "undo-done": async (el) => {
     const g = giftById(el.dataset.id);
@@ -1517,12 +1619,19 @@ const actions = {
     catch (err) { toast(friendlyError(err)); }
   },
   // Case à cocher de « Mes achats »
-  "toggle-done": async (el) => {
+  "toggle-done": (el) => {
     const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g || !p || p.boughtBy !== myUid()) return;
     const nowDone = !isDone(p);
-    try { await updateDoc(purchaseRef(g), { done: nowDone }); if (nowDone) toast("Bravo, c'est acheté ! 🎉"); }
-    catch (err) { toast(friendlyError(err)); }
+    if (nowDone) {
+      el.checked = false; // on ne coche vraiment qu'une fois le prix confirmé (ou laissé vide)
+      openPriceModal(g, { group: !!p.group }, async (price) => {
+        await updateDoc(purchaseRef(g), { done: true, actualPrice: price });
+        toast("Bravo, c'est acheté ! 🎉");
+      });
+      return;
+    }
+    updateDoc(purchaseRef(g), { done: false }).catch((err) => toast(friendlyError(err)));
   },
   "unbuy": async (el) => {
     const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
