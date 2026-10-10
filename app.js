@@ -535,6 +535,8 @@ const iManage = (m) => isChild(m) && (m.managerIds || []).includes(myUid());
 const canEditFor = (ownerUid) => ownerUid === myUid() || iManage(memberOf(ownerUid));
 const giftById = (id) => state.gifts.find((g) => g.id === id);
 const isNewGift = (g) => state.since !== null && g.createdBy !== myUid() && g.ownerId !== myUid() && ms(g.createdAt) > state.since;
+// Un cadeau a .ownerId, une idée secrète a .ownerUid : ce raccourci marche pour les deux.
+const ownerOf = (item) => item.ownerId || item.ownerUid;
 
 function myNotifyPrefs() {
   const me = memberOf(myUid());
@@ -702,13 +704,17 @@ function giftCard(g, { isMe, canEdit }) {
 function ideaCard(n) {
   const link = normalizeUrl(n.url);
   const mine = n.addedBy === myUid();
-  return `<article class="gift idea">
+  const p = state.purchases.get(n.id);
+  const cls = p ? (isDone(p) ? " bought" : " taken") : "";
+  const mark = p && !isDone(p) ? (p.group ? "👥" : "🛍") : "";
+  return `<article class="gift idea${cls}"${mark ? ` data-mark="${mark}"` : ""}>
     ${mediaHtml(n)}
     <div class="gift-body">
       <h3>${esc(n.name)}</h3>
       ${tagsHtml(n, `<span class="tag">Proposé par ${mine ? "toi" : esc(nameOf(n.addedBy, n.addedByName))}</span>`)}
       ${n.description ? `<p>${esc(n.description)}</p>` : ""}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
+      ${purchaseZone(n)}
       <div class="gift-foot">
         ${threadButton(n.id, n.ownerUid, n.name)}
         ${mine ? `<span class="spacer"></span>
@@ -735,19 +741,19 @@ const sortedGifts = (uid) => state.gifts.filter((g) => g.ownerId === uid)
 function myPurchaseItems() {
   const me = myUid(), items = [];
   for (const [giftId, p] of state.purchases) {
-    const g = giftById(giftId);
+    const g = findItem(giftId);
     if (!g) continue;
     if (p.boughtBy === me) items.push({ g, p, role: "buyer", done: isDone(p) });
     else if (p.group && (state.joins.get(giftId) || []).some((j) => j.uid === me && j.gid === p.gid)) {
       items.push({ g, p, role: "joiner", done: isDone(p) });
     }
   }
-  return items.sort((a, b) => String(nameOf(a.g.ownerId, a.g.ownerName)).localeCompare(String(nameOf(b.g.ownerId, b.g.ownerName)), "fr"));
+  return items.sort((a, b) => String(nameOf(ownerOf(a.g))).localeCompare(String(nameOf(ownerOf(b.g))), "fr"));
 }
 
 function todoRow({ g, p, role, done }) {
   const link = normalizeUrl(g.url);
-  const recipient = memberOf(g.ownerId);
+  const recipient = memberOf(ownerOf(g));
   const tags = [];
   if (p.group) {
     const others = (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).map((j) => esc(nameOf(j.uid, j.name)));
@@ -760,7 +766,7 @@ function todoRow({ g, p, role, done }) {
     <input class="check" type="checkbox" data-action="toggle-done" data-id="${esc(g.id)}"${done ? " checked" : ""}${role === "joiner" ? " disabled" : ""} aria-label="Acheté : ${esc(g.name)}">
     <div class="grow todo-main">
       <div class="todo-name">${esc(g.name)}</div>
-      <div class="muted small">pour ${isChild(recipient) ? "🧸 " : ""}${esc(nameOf(g.ownerId, g.ownerName))}</div>
+      <div class="muted small">pour ${isChild(recipient) ? "🧸 " : ""}${esc(nameOf(ownerOf(g)))}</div>
       ${tagsHtml(g, tags.join(""))}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
     </div>
@@ -797,8 +803,8 @@ function budgetByPerson() {
     const share = p.group
       ? totalAmount / (1 + (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).length)
       : totalAmount;
-    const uid = g.ownerId;
-    if (!totals.has(uid)) totals.set(uid, { uid, name: nameOf(uid, g.ownerName), spent: 0, pending: 0 });
+    const uid = ownerOf(g);
+    if (!totals.has(uid)) totals.set(uid, { uid, name: nameOf(uid), spent: 0, pending: 0 });
     const t = totals.get(uid);
     if (done) t.spent += share; else t.pending += share;
   }
@@ -1488,7 +1494,7 @@ function openPdfModal() {
 // ─────────────────────────────────────────────────────────────
 //  Achats, participations
 // ─────────────────────────────────────────────────────────────
-const purchaseRef = (g, docId = g.id) => doc(db, "lists", state.listId, "purchases", g.ownerId, "items", docId);
+const purchaseRef = (g, docId = g.id) => doc(db, "lists", state.listId, "purchases", ownerOf(g), "items", docId);
 
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
@@ -1552,7 +1558,7 @@ const actions = {
   },
 
   "buy": async (el) => {
-    const g = giftById(el.dataset.id);
+    const g = findItem(el.dataset.id);
     if (!g) return;
     try {
       await setDoc(purchaseRef(g), { kind: "buy", boughtBy: myUid(), boughtByName: myName(), group: false, done: false, at: serverTimestamp() });
@@ -1562,7 +1568,7 @@ const actions = {
     }
   },
   "pool": async (el) => {
-    const g = giftById(el.dataset.id);
+    const g = findItem(el.dataset.id);
     if (!g) return;
     try {
       await setDoc(purchaseRef(g), {
@@ -1574,7 +1580,7 @@ const actions = {
     }
   },
   "join-pool": async (el) => {
-    const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
+    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g || !p) return;
     try {
       await setDoc(purchaseRef(g, `${g.id}__${myUid()}`), {
@@ -1584,14 +1590,14 @@ const actions = {
     } catch (err) { toast(friendlyError(err)); }
   },
   "leave-pool": async (el) => {
-    const g = giftById(el.dataset.id);
+    const g = findItem(el.dataset.id);
     if (!g) return;
     if (el.dataset.confirm && !confirm(`Ne plus participer à « ${g.name} » ?`)) return;
     try { await deleteDoc(purchaseRef(g, `${g.id}__${myUid()}`)); }
     catch (err) { toast(friendlyError(err)); }
   },
   "mark-done": (el) => {
-    const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
+    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g) return;
     openPriceModal(g, { group: !!p?.group }, async (price) => {
       await updateDoc(purchaseRef(g), { done: true, actualPrice: price });
@@ -1599,14 +1605,14 @@ const actions = {
     });
   },
   "undo-done": async (el) => {
-    const g = giftById(el.dataset.id);
+    const g = findItem(el.dataset.id);
     if (!g) return;
     try { await updateDoc(purchaseRef(g), { done: false }); }
     catch (err) { toast(friendlyError(err)); }
   },
   // Case à cocher de « Mes achats »
   "toggle-done": (el) => {
-    const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
+    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g || !p || p.boughtBy !== myUid()) return;
     const nowDone = !isDone(p);
     if (nowDone) {
@@ -1620,7 +1626,7 @@ const actions = {
     updateDoc(purchaseRef(g), { done: false }).catch((err) => toast(friendlyError(err)));
   },
   "unbuy": async (el) => {
-    const g = giftById(el.dataset.id), p = g && state.purchases.get(g.id);
+    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
     if (!g) return;
     if (el.dataset.confirm && !confirm(`Retirer « ${g.name} » de tes achats ? Il redeviendra disponible pour les autres.`)) return;
     const others = p && p.group ? (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).length : 0;
