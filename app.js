@@ -650,7 +650,8 @@ function purchaseZone(g) {
 
   if (!p.group) {
     if (done) {
-      const priceTag = typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))}` : "";
+      // Le prix payé reste privé : seul·e l'acheteur·se le voit, pas le reste du groupe.
+      const priceTag = iAmOrganiser && typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))}` : "";
       return `<div class="gift-foot"><span class="status">✅ Acheté par ${iAmOrganiser ? "toi" : esc(who)}${priceTag}</span>${undo}</div>`;
     }
     return iAmOrganiser
@@ -666,7 +667,8 @@ function purchaseZone(g) {
   const names = [label(p.boughtBy, p.boughtByName, true), ...joins.map((j) => label(j.uid, j.name, false))].join(", ");
   const iJoined = joins.some((j) => j.uid === me);
   if (done) {
-    const priceTag = typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))} au total` : "";
+    // Le prix payé reste privé : seuls les participants (qui le partagent) le voient.
+    const priceTag = (iAmOrganiser || iJoined) && typeof p.actualPrice === "number" ? ` · ${esc(priceFmt.format(p.actualPrice))} au total` : "";
     return `<div class="gift-foot"><span class="status">✅ Acheté à plusieurs : ${names}${priceTag}</span>${undo}</div>`;
   }
   return `<div class="status pool">👥 On l'offre à plusieurs : ${names}</div>
