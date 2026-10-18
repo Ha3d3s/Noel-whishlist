@@ -53,6 +53,9 @@ const state = {
   ideas: new Map(),        // uid -> idées secrètes pour cette personne
   comments: new Map(),     // giftId / ideaId -> commentaires secrets
   thread: null,            // fil de commentaires ouvert
+  questions: new Map(),    // giftId / ideaId -> questions publiques et anonymes
+  toastedQuestions: new Set(), // questions déjà annoncées cette session (jamais deux fois)
+  qthread: null,           // fil de questions ouvert
   signup: null,            // inscription en cours (on attend que le prénom soit enregistré)
   nameSynced: false,       // ma fiche de la liste ouverte a été remise à jour
 };
@@ -167,7 +170,7 @@ function openModal(html, onMount) {
   if (firstInput) firstInput.focus({ preventScroll: true });
   if (onMount) onMount(modal);
 }
-function closeModal() { $modal.innerHTML = ""; state.thread = null; }
+function closeModal() { $modal.innerHTML = ""; state.thread = null; state.qthread = null; }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
 // Une image cassée disparaît au lieu d'afficher une icône moche
@@ -395,9 +398,10 @@ function stopList(saveSeen = true) {
   state.memberSubs = new Map();
   state.purchaseDocs = new Map(); state.secretDocs = new Map();
   state.purchases = new Map(); state.joins = new Map(); state.ideas = new Map(); state.comments = new Map();
+  state.questions = new Map(); state.toastedQuestions = new Set();
   state.listId = null; state.list = null; state.members = []; state.gifts = [];
   state.since = null; state.sessionStart = null; state.toastedGifts = new Set();
-  state.selectedUid = null; state.thread = null; state.nameSynced = false;
+  state.selectedUid = null; state.thread = null; state.qthread = null; state.nameSynced = false;
 }
 
 function openList(id) {
@@ -443,6 +447,21 @@ function openList(id) {
     state.gifts = s.docs.map((d) => ({ id: d.id, ...d.data() }));
     announceNewGifts(s.docChanges());
     renderList();
+  }, () => {}));
+
+  // Questions : contrairement aux achats et idées secrètes, elles sont visibles de tout
+  // le monde (y compris la personne concernée) donc une seule écoute suffit pour toute la liste.
+  state.unsubs.push(onSnapshot(query(collection(db, "lists", id, "questions"), orderBy("createdAt", "asc")), (s) => {
+    state.questions = new Map();
+    for (const d of s.docs) {
+      const q = { id: d.id, ...d.data() };
+      const arr = state.questions.get(q.refId) || [];
+      arr.push(q);
+      state.questions.set(q.refId, arr);
+    }
+    announceNewQuestions(s.docChanges());
+    renderList();
+    renderQuestionThread();
   }, () => {}));
 }
 
@@ -563,6 +582,23 @@ function announceNewGifts(changes) {
   }
 }
 
+// Prévient seulement la personne concernée (propriétaire du cadeau, ou proposeur de l'idée)
+// qu'une question (ou une réponse) vient d'être postée — jamais qui l'a posée.
+function announceNewQuestions(changes) {
+  const me = myUid();
+  for (const ch of changes) {
+    if (ch.type !== "added") continue;
+    const id = ch.doc.id;
+    if (state.toastedQuestions.has(id)) continue;
+    state.toastedQuestions.add(id);
+    const q = ch.doc.data();
+    if (ms(q.createdAt, Infinity) <= state.sessionStart) continue;  // déjà là avant que j'ouvre la liste
+    if (q.authorUid === me || q.targetUid !== me) continue;
+    const item = findItem(q.refId);
+    toast(`❓ Nouvelle question sur « ${item ? item.name : "un cadeau"} »`, 7000);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Écran : une liste — affichage
 // ─────────────────────────────────────────────────────────────
@@ -633,6 +669,13 @@ function threadButton(refId, ownerUid, title) {
   return `<button class="btn btn-line btn-small" data-action="thread" data-ref="${esc(refId)}" data-owner="${esc(ownerUid)}" data-title="${esc(title)}">💬 ${n ? `Commentaires (${n})` : "Commenter"}</button>`;
 }
 
+// Questions publiques (visibles de tout le monde, y compris la personne concernée) mais
+// toujours posées « anonymement » : personne ne sait qui a écrit quoi, sauf soi-même.
+function questionButton(refId, targetUid, title) {
+  const n = (state.questions.get(refId) || []).length;
+  return `<button class="btn btn-line btn-small" data-action="qthread" data-ref="${esc(refId)}" data-target="${esc(targetUid)}" data-title="${esc(title)}">❓ ${n ? `Questions (${n})` : "Poser une question"}</button>`;
+}
+
 function purchaseZone(g) {
   const p = state.purchases.get(g.id);
   const me = myUid();
@@ -695,6 +738,7 @@ function giftCard(g, { isMe, canEdit }) {
       ${isMe ? "" : purchaseZone(g)}
       <div class="gift-foot">
         ${isMe ? "" : threadButton(g.id, g.ownerId, g.name)}
+        ${questionButton(g.id, g.ownerId, g.name)}
         ${canEdit ? `<span class="spacer"></span>
           <button class="btn btn-line btn-small" data-action="edit-gift" data-id="${esc(g.id)}">Modifier</button>
           <button class="btn btn-ghost btn-small" data-action="delete-gift" data-id="${esc(g.id)}">Supprimer</button>` : ""}
@@ -719,6 +763,7 @@ function ideaCard(n) {
       ${purchaseZone(n)}
       <div class="gift-foot">
         ${threadButton(n.id, n.ownerUid, n.name)}
+        ${questionButton(n.id, n.addedBy, n.name)}
         ${mine ? `<span class="spacer"></span>
           <button class="btn btn-line btn-small" data-action="edit-idea" data-owner="${esc(n.ownerUid)}" data-id="${esc(n.id)}">Modifier</button>
           <button class="btn btn-ghost btn-small" data-action="delete-note" data-kind="idea" data-owner="${esc(n.ownerUid)}" data-id="${esc(n.id)}">Supprimer</button>` : ""}
@@ -1158,6 +1203,49 @@ function renderThread() {
         <b>${c.addedBy === myUid() ? "Toi" : esc(nameOf(c.addedBy, c.addedByName))}</b><span>${esc(c.text)}</span>
         ${c.addedBy === myUid() ? `<button class="link-btn" data-action="delete-note" data-owner="${esc(c.ownerUid)}" data-id="${esc(c.id)}">Supprimer</button>` : ""}</div>`).join("")
     : `<p class="hint">Pas encore de commentaire. Lance la discussion !</p>`;
+  box.scrollTop = box.scrollHeight;
+}
+
+// ── Questions publiques et anonymes sur un cadeau ou une idée ─
+// Contrairement aux commentaires, visibles de tout le monde y compris la personne concernée,
+// mais l'auteur·e n'est jamais identifié·e (sauf à soi-même, pour pouvoir supprimer son message).
+function openQuestionThread(refId, targetUid, title) {
+  openModal(`
+    <h2>❓ ${esc(title)}</h2>
+    <p class="hint">Visible par tout le monde, y compris ${esc(nameOf(targetUid, "la personne concernée"))}. Les questions et réponses restent toujours anonymes.</p>
+    <div class="thread" id="qthread-body"></div>
+    <form class="row" id="qthread-form">
+      <input class="input grow" id="q-text" maxlength="300" autocomplete="off" placeholder="Pose ta question…">
+      <button class="btn btn-primary btn-small" type="submit">Envoyer</button>
+    </form>
+    <div class="btns"><button type="button" class="btn btn-ghost" data-action="close-modal">Fermer</button></div>`, (m) => {
+    m.querySelector("#qthread-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = m.querySelector("#q-text");
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      try {
+        await addDoc(collection(db, "lists", state.listId, "questions"), {
+          refId, targetUid, text, authorUid: myUid(), authorName: myName(), createdAt: serverTimestamp(),
+        });
+      } catch (err) { input.value = text; toast(friendlyError(err)); }
+    });
+  });
+  state.qthread = { refId };
+  renderQuestionThread();
+}
+
+function renderQuestionThread() {
+  const box = document.getElementById("qthread-body");
+  if (!box || !state.qthread) return;
+  const me = myUid();
+  const items = state.questions.get(state.qthread.refId) || [];
+  box.innerHTML = items.length
+    ? items.map((q) => `<div class="bubble${q.authorUid === me ? " mine" : ""}">
+        <b>${q.authorUid === me ? "Toi" : "Anonyme"}</b><span>${esc(q.text)}</span>
+        ${q.authorUid === me ? `<button class="link-btn" data-action="delete-question" data-id="${esc(q.id)}">Supprimer</button>` : ""}</div>`).join("")
+    : `<p class="hint">Pas encore de question. Lance la discussion !</p>`;
   box.scrollTop = box.scrollHeight;
 }
 
@@ -1648,6 +1736,11 @@ const actions = {
     catch (err) { toast(friendlyError(err)); }
   },
   "thread": (el) => openThread(el.dataset.ref, el.dataset.owner, el.dataset.title),
+  "qthread": (el) => openQuestionThread(el.dataset.ref, el.dataset.target, el.dataset.title),
+  "delete-question": async (el) => {
+    try { await deleteDoc(doc(db, "lists", state.listId, "questions", el.dataset.id)); }
+    catch (err) { toast(friendlyError(err)); }
+  },
   "zoom": (el) => { const it = findItem(el.dataset.ref); if (it) openLightbox(it, Number(el.dataset.index) || 0); },
   "car-prev": (el) => { const t = el.closest(".carousel").querySelector(".car-track"); t.scrollBy({ left: -t.clientWidth, behavior: "smooth" }); },
   "car-next": (el) => { const t = el.closest(".carousel").querySelector(".car-track"); t.scrollBy({ left: t.clientWidth, behavior: "smooth" }); },
