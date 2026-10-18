@@ -8,8 +8,8 @@ import {
   signOut, updateProfile, sendPasswordResetEmail,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, onSnapshot,
-  query, where, orderBy, serverTimestamp,
+  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, collectionGroup, onSnapshot,
+  query, where, orderBy, serverTimestamp, writeBatch, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -56,6 +56,10 @@ const state = {
   questions: new Map(),    // giftId / ideaId -> questions publiques et anonymes
   toastedQuestions: new Set(), // questions déjà annoncées cette session (jamais deux fois)
   qthread: null,           // fil de questions ouvert
+  wishes: [],              // cadeaux interconnectés (sur plusieurs listes) partagés avec CETTE liste
+  wishLocks: new Map(),    // wishId -> { done, group, boughtInList } — visible de toutes les listes concernées
+  wishDetails: new Map(),  // wishId -> { boughtBy, boughtByName, gid, actualPrice } — seulement si acheté depuis CETTE liste
+  wishJoins: new Map(),    // wishId -> participants à un cadeau à plusieurs — seulement si acheté depuis CETTE liste
   signup: null,            // inscription en cours (on attend que le prénom soit enregistré)
   nameSynced: false,       // ma fiche de la liste ouverte a été remise à jour
 };
@@ -399,6 +403,7 @@ function stopList(saveSeen = true) {
   state.purchaseDocs = new Map(); state.secretDocs = new Map();
   state.purchases = new Map(); state.joins = new Map(); state.ideas = new Map(); state.comments = new Map();
   state.questions = new Map(); state.toastedQuestions = new Set();
+  state.wishes = []; state.wishLocks = new Map(); state.wishDetails = new Map(); state.wishJoins = new Map();
   state.listId = null; state.list = null; state.members = []; state.gifts = [];
   state.since = null; state.sessionStart = null; state.toastedGifts = new Set();
   state.selectedUid = null; state.thread = null; state.qthread = null; state.nameSynced = false;
@@ -462,6 +467,36 @@ function openList(id) {
     announceNewQuestions(s.docChanges());
     renderList();
     renderQuestionThread();
+  }, () => {}));
+
+  // Cadeaux interconnectés (sur plusieurs listes) : rangés hors de n'importe quelle liste,
+  // reliés par le champ « lists ». On ne récupère que ceux qui concernent CETTE liste.
+  state.unsubs.push(onSnapshot(query(collection(db, "wishes"), where("lists", "array-contains", id)), (s) => {
+    state.wishes = s.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderList();
+  }, () => {}));
+
+  // Le « verrou » d'achat (acheté ou non) d'un cadeau interconnecté est visible de toutes
+  // les listes où il apparaît ; qui l'a acheté ne l'est que depuis la liste où ça s'est fait.
+  state.unsubs.push(onSnapshot(query(collection(db, "wishPurchases"), where("lists", "array-contains", id)), (s) => {
+    state.wishLocks = new Map();
+    for (const d of s.docs) state.wishLocks.set(d.id, { id: d.id, ...d.data() });
+    renderList();
+  }, () => {}));
+  state.unsubs.push(onSnapshot(query(collectionGroup(db, "detail"), where("boughtInList", "==", id)), (s) => {
+    state.wishDetails = new Map();
+    state.wishJoins = new Map();
+    for (const d of s.docs) {
+      const wishId = d.ref.parent.parent.id;
+      const data = { id: d.id, ...d.data() };
+      if (d.id === "main") state.wishDetails.set(wishId, data);
+      else {
+        const arr = state.wishJoins.get(wishId) || [];
+        arr.push(data);
+        state.wishJoins.set(wishId, arr);
+      }
+    }
+    renderList();
   }, () => {}));
 }
 
@@ -553,9 +588,21 @@ const isChild = (m) => !!m && m.kind === "child";
 const iManage = (m) => isChild(m) && (m.managerIds || []).includes(myUid());
 const canEditFor = (ownerUid) => ownerUid === myUid() || iManage(memberOf(ownerUid));
 const giftById = (id) => state.gifts.find((g) => g.id === id);
+const wishById = (id) => state.wishes.find((w) => w.id === id);
+// Un cadeau interconnecté (sur plusieurs listes) a un champ .lists ; un cadeau classique non.
+const isWish = (item) => Array.isArray(item?.lists);
 const isNewGift = (g) => state.since !== null && g.createdBy !== myUid() && g.ownerId !== myUid() && ms(g.createdAt) > state.since;
 // Un cadeau a .ownerId, une idée secrète a .ownerUid : ce raccourci marche pour les deux.
 const ownerOf = (item) => item.ownerId || item.ownerUid;
+// « Verrou » d'achat, identique pour un cadeau classique ou interconnecté : { done, group } ou null si libre.
+function lockInfo(g) {
+  if (isWish(g)) {
+    const l = state.wishLocks.get(g.id);
+    return l ? { done: !!l.done, group: !!l.group } : null;
+  }
+  const p = state.purchases.get(g.id);
+  return p ? { done: isDone(p), group: !!p.group } : null;
+}
 
 function myNotifyPrefs() {
   const me = memberOf(myUid());
@@ -636,7 +683,7 @@ document.addEventListener("scroll", (e) => {
   const t = e.target;
   if (t && t.classList && t.classList.contains("car-track")) { const car = t.closest(".carousel"); if (car) updateCarousel(car); }
 }, true);
-const findItem = (ref) => giftById(ref) || [...state.ideas.values()].flat().find((n) => n.id === ref);
+const findItem = (ref) => giftById(ref) || wishById(ref) || [...state.ideas.values()].flat().find((n) => n.id === ref);
 
 // Photo en grand (avec le même carrousel si plusieurs)
 function openLightbox(item, index = 0) {
@@ -723,19 +770,75 @@ function purchaseZone(g) {
         : `<button class="btn btn-soft btn-small" data-action="join-pool" data-id="${id}">🙋 Je participe</button>`}</div>`;
 }
 
+// Pareil que purchaseZone, mais pour un cadeau interconnecté (sur plusieurs listes) :
+// le verrou (pris ou non) est visible partout, mais qui l'a pris ne l'est que depuis
+// la liste où ça s'est fait. Depuis une autre liste, on voit juste que c'est déjà pris.
+function wishPurchaseZone(g) {
+  const lock = state.wishLocks.get(g.id);
+  const me = myUid();
+  const id = esc(g.id);
+  if (!lock) {
+    return `<div class="gift-foot">
+      <button class="btn btn-primary btn-small" data-action="wish-buy" data-id="${id}">🛍️ Je le prends</button>
+      <button class="btn btn-soft btn-small" data-action="wish-pool" data-id="${id}">👥 À plusieurs</button></div>`;
+  }
+  if (lock.boughtInList !== state.listId) {
+    return `<div class="gift-foot"><span class="status pool">${lock.done ? "✅ Déjà acheté" : "🛍️ Déjà pris"} (sur une autre de tes listes)</span></div>`;
+  }
+  const detail = state.wishDetails.get(g.id);
+  if (!detail) return `<div class="gift-foot"><span class="status pool">🛍️ Pris…</span></div>`;
+  const done = !!lock.done;
+  const iAmOrganiser = detail.boughtBy === me;
+  const who = nameOf(detail.boughtBy, detail.boughtByName);
+  const undo = iAmOrganiser
+    ? `<span class="spacer"></span><button class="btn btn-ghost btn-small" data-action="wish-undo-done" data-id="${id}">Décocher</button>` : "";
+
+  if (!lock.group) {
+    if (done) {
+      const priceTag = iAmOrganiser && typeof detail.actualPrice === "number" ? ` · ${esc(priceFmt.format(detail.actualPrice))}` : "";
+      return `<div class="gift-foot"><span class="status">✅ Acheté par ${iAmOrganiser ? "toi" : esc(who)}${priceTag}</span>${undo}</div>`;
+    }
+    return iAmOrganiser
+      ? `<div class="status pool">🛍️ Tu le prends</div>
+         <div class="gift-foot"><button class="btn btn-primary btn-small" data-action="wish-mark-done" data-id="${id}">✅ C'est acheté</button>
+         <button class="btn btn-ghost btn-small" data-action="wish-unbuy" data-id="${id}">Annuler</button></div>`
+      : `<div class="gift-foot"><span class="status pool">🛍️ ${esc(who)} le prend</span></div>`;
+  }
+
+  const joins = state.wishJoins.get(g.id) || [];
+  const label = (uid, name, organiser) => `${uid === me ? "toi" : esc(nameOf(uid, name))}${organiser ? " (organise)" : ""}`;
+  const names = [label(detail.boughtBy, detail.boughtByName, true), ...joins.map((j) => label(j.uid, j.name, false))].join(", ");
+  const iJoined = joins.some((j) => j.uid === me);
+  if (done) {
+    const priceTag = (iAmOrganiser || iJoined) && typeof detail.actualPrice === "number" ? ` · ${esc(priceFmt.format(detail.actualPrice))} au total` : "";
+    return `<div class="gift-foot"><span class="status">✅ Acheté à plusieurs : ${names}${priceTag}</span>${undo}</div>`;
+  }
+  return `<div class="status pool">👥 On l'offre à plusieurs : ${names}</div>
+    <div class="gift-foot">${iAmOrganiser
+      ? `<button class="btn btn-primary btn-small" data-action="wish-mark-done" data-id="${id}">✅ C'est acheté</button>
+         <button class="btn btn-ghost btn-small" data-action="wish-unbuy" data-id="${id}">Annuler</button>`
+      : iJoined
+        ? `<button class="btn btn-line btn-small" data-action="wish-leave-pool" data-id="${id}">Je ne participe plus</button>`
+        : `<button class="btn btn-soft btn-small" data-action="wish-join-pool" data-id="${id}">🙋 Je participe</button>`}</div>`;
+}
+
 function giftCard(g, { isMe, canEdit }) {
-  const p = isMe ? null : state.purchases.get(g.id);
+  const locked = isMe ? null : lockInfo(g);
   const link = normalizeUrl(g.url);
-  const cls = p ? (isDone(p) ? " bought" : " taken") : "";
-  const mark = p && !isDone(p) ? (p.group ? "👥" : "🛍") : "";
+  const cls = locked ? (locked.done ? " bought" : " taken") : "";
+  const mark = locked && !locked.done ? (locked.group ? "👥" : "🛍") : "";
+  const extraTags = [
+    isNewGift(g) ? `<span class="tag tag-new">Nouveau</span>` : "",
+    isWish(g) && g.lists.length > 1 ? `<span class="tag">📋 Sur ${g.lists.length} listes</span>` : "",
+  ].join("");
   return `<article class="gift${cls}"${mark ? ` data-mark="${mark}"` : ""}>
     ${mediaHtml(g)}
     <div class="gift-body">
       <h3>${esc(g.name)}</h3>
-      ${tagsHtml(g, isNewGift(g) ? `<span class="tag tag-new">Nouveau</span>` : "")}
+      ${tagsHtml(g, extraTags)}
       ${g.description ? `<p>${esc(g.description)}</p>` : ""}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
-      ${isMe ? "" : purchaseZone(g)}
+      ${isMe ? "" : (isWish(g) ? wishPurchaseZone(g) : purchaseZone(g))}
       <div class="gift-foot">
         ${isMe ? "" : threadButton(g.id, g.ownerId, g.name)}
         ${questionButton(g.id, g.ownerId, g.name)}
@@ -780,9 +883,9 @@ function orderedMembers() {
   const rank = (m) => (m.uid === me ? 0 : iManage(m) ? 1 : 2);
   return [...state.members].sort((a, b) => rank(a) - rank(b) || String(a.name).localeCompare(String(b.name), "fr"));
 }
-// Les envies fortes d'abord, puis par ordre d'ajout
-const sortedGifts = (uid) => state.gifts.filter((g) => g.ownerId === uid)
-  .map((g, i) => [g, i]).sort((a, b) => (b[0].star ? 1 : 0) - (a[0].star ? 1 : 0) || a[1] - b[1]).map((x) => x[0]);
+// Les envies fortes d'abord, puis par ordre d'ajout (cadeaux classiques + interconnectés mélangés)
+const sortedGifts = (uid) => [...state.gifts.filter((g) => g.ownerId === uid), ...state.wishes.filter((w) => w.ownerId === uid)]
+  .sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0) || ms(a.createdAt) - ms(b.createdAt));
 
 // Tout ce que JE me suis engagé à acheter (seul·e ou à plusieurs)
 function myPurchaseItems() {
@@ -1069,6 +1172,13 @@ function openGiftModal({ item = null, kind = "gift", ownerUid = myUid() } = {}) 
         <div class="row"><input class="input grow" id="g-img-url" inputmode="url" autocapitalize="none" placeholder="Ou colle l'adresse d'une image" aria-label="Adresse d'une image">
           <button type="button" class="btn btn-line btn-small" id="g-add-url">Ajouter</button></div>
         <span class="hint" id="g-count"></span></div>
+      ${(!isIdea && ownerUid === myUid() && state.lists.length > 1) ? `
+      <div class="field"><span class="label">Sur quelles listes ? <span class="muted">(jusqu'à 5)</span></span>
+        <p class="hint">Le même cadeau peut être proposé sur plusieurs de tes listes : s'il est pris sur l'une, il devient indisponible sur les autres (sans dire qui l'a pris, ni où, sauf sur la liste où ça s'est fait).</p>
+        <div class="stack" id="g-lists">
+          ${state.lists.map((l) => `<label class="opt"><input type="checkbox" name="g-list" value="${esc(l.id)}"${(isWish(item) ? item.lists : [state.listId]).includes(l.id) ? " checked" : ""}${l.id === state.listId ? " disabled" : ""}> ${esc(l.name)}${l.id === state.listId ? " (liste actuelle)" : ""}</label>`).join("")}
+        </div>
+      </div>` : ""}
       <div class="btns sticky"><button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>
         <button class="btn btn-primary" type="submit">${editing ? "Enregistrer" : isIdea ? "Ajouter l'idée" : "Ajouter à la liste"}</button></div>
     </form>`, (m) => {
@@ -1139,6 +1249,18 @@ function openGiftModal({ item = null, kind = "gift", ownerUid = myUid() } = {}) 
         price: parsePrice(m.querySelector("#g-price").value),
       };
       if (!isIdea) data.star = m.querySelector("#g-star").checked;
+
+      // Sur quelles listes ce cadeau doit-il apparaître ? (toujours la liste actuelle, + celles cochées)
+      const listBoxes = m.querySelectorAll('input[name="g-list"]');
+      let selectedLists = [state.listId];
+      if (listBoxes.length) {
+        selectedLists = [...listBoxes].filter((c) => c.checked).map((c) => c.value);
+        if (!selectedLists.includes(state.listId)) selectedLists.push(state.listId);
+        if (selectedLists.length > 5) return toast("Maximum 5 listes pour un même cadeau.");
+      }
+      const wasWish = editing && isWish(item);
+      const makeWish = !isIdea && (selectedLists.length > 1 || wasWish);
+
       e.submitter && (e.submitter.disabled = true);
       try {
         const lid = state.listId, me = myUid();
@@ -1149,6 +1271,21 @@ function openGiftModal({ item = null, kind = "gift", ownerUid = myUid() } = {}) 
             await addDoc(collection(db, "lists", lid, "secret", ownerUid, "items"), {
               ...data, kind: "idea", addedBy: me, addedByName: myName(), createdAt: serverTimestamp(),
             });
+          }
+        } else if (makeWish) {
+          if (wasWish) {
+            await updateDoc(doc(db, "wishes", item.id), { ...data, lists: selectedLists, updatedAt: serverTimestamp() });
+          } else {
+            // Cadeau interconnecté pour la première fois : on le crée à part (et, si on éditait
+            // un cadeau « liste unique » existant, on retire l'ancien). Un achat déjà en cours sur
+            // l'ancien cadeau ne peut pas être détecté ici (il reste, par principe, invisible pour
+            // son destinataire) : ne pas interconnecter un cadeau déjà pris évite ce cas de figure.
+            const wishRef = editing ? doc(db, "wishes", item.id) : doc(collection(db, "wishes"));
+            await setDoc(wishRef, {
+              ...data, ownerId: me, ownerName: myName(), createdBy: me, lists: selectedLists,
+              createdAt: editing ? (item.createdAt || serverTimestamp()) : serverTimestamp(),
+            });
+            if (editing) await deleteDoc(doc(db, "lists", lid, "gifts", item.id));
           }
         } else if (editing) {
           await updateDoc(doc(db, "lists", lid, "gifts", item.id), { ...data, updatedAt: serverTimestamp() });
@@ -1593,7 +1730,7 @@ const joinUrl = () => `${location.origin}${location.pathname}#/rejoindre/${state
 
 // Petite fenêtre pour confirmer le prix réellement payé, au moment où on coche « acheté »
 function openPriceModal(g, { group = false } = {}, onConfirm) {
-  const p = state.purchases.get(g.id);
+  const p = isWish(g) ? state.wishDetails.get(g.id) : state.purchases.get(g.id);
   const prefill = typeof p?.actualPrice === "number" ? p.actualPrice
     : (typeof g.price === "number" ? g.price : null);
   openModal(`
@@ -1639,12 +1776,14 @@ const actions = {
   "delete-child": (el) => deleteChild(el.dataset.uid),
 
   "add-gift": (el) => openGiftModal({ kind: "gift", ownerUid: el.dataset.owner }),
-  "edit-gift": (el) => { const g = giftById(el.dataset.id); if (g) openGiftModal({ kind: "gift", item: g, ownerUid: g.ownerId }); },
+  "edit-gift": (el) => { const g = findItem(el.dataset.id); if (g) openGiftModal({ kind: "gift", item: g, ownerUid: g.ownerId }); },
   "delete-gift": async (el) => {
-    const g = giftById(el.dataset.id);
+    const g = findItem(el.dataset.id);
     if (!g || !confirm(`Supprimer « ${g.name} » de la liste ?`)) return;
-    try { await deleteDoc(doc(db, "lists", state.listId, "gifts", g.id)); toast("Cadeau supprimé."); }
-    catch (err) { toast(friendlyError(err)); }
+    try {
+      await deleteDoc(isWish(g) ? doc(db, "wishes", g.id) : doc(db, "lists", state.listId, "gifts", g.id));
+      toast("Cadeau supprimé.");
+    } catch (err) { toast(friendlyError(err)); }
   },
 
   "buy": async (el) => {
@@ -1725,77 +1864,72 @@ const actions = {
     catch (err) { toast(friendlyError(err)); }
   },
 
-  "add-idea": (el) => openGiftModal({ kind: "idea", ownerUid: el.dataset.owner }),
-  "edit-idea": (el) => {
-    const n = (state.ideas.get(el.dataset.owner) || []).find((x) => x.id === el.dataset.id);
-    if (n) openGiftModal({ kind: "idea", item: n, ownerUid: n.ownerUid });
-  },
-  "delete-note": async (el) => {
-    if (el.dataset.kind === "idea" && !confirm("Supprimer cette idée ?")) return;
-    try { await deleteDoc(doc(db, "lists", state.listId, "secret", el.dataset.owner, "items", el.dataset.id)); }
-    catch (err) { toast(friendlyError(err)); }
-  },
-  "thread": (el) => openThread(el.dataset.ref, el.dataset.owner, el.dataset.title),
-  "qthread": (el) => openQuestionThread(el.dataset.ref, el.dataset.target, el.dataset.title),
-  "delete-question": async (el) => {
-    try { await deleteDoc(doc(db, "lists", state.listId, "questions", el.dataset.id)); }
-    catch (err) { toast(friendlyError(err)); }
-  },
-  "zoom": (el) => { const it = findItem(el.dataset.ref); if (it) openLightbox(it, Number(el.dataset.index) || 0); },
-  "car-prev": (el) => { const t = el.closest(".carousel").querySelector(".car-track"); t.scrollBy({ left: -t.clientWidth, behavior: "smooth" }); },
-  "car-next": (el) => { const t = el.closest(".carousel").querySelector(".car-track"); t.scrollBy({ left: t.clientWidth, behavior: "smooth" }); },
-
-  "share": async () => {
-    const url = joinUrl();
-    const text = `Rejoins ma liste de Noël « ${state.list?.name || ""} » 🎄`;
-    if (navigator.share) {
-      try { await navigator.share({ title: "Liste de Noël", text, url }); return; }
-      catch (e) { if (e && e.name === "AbortError") return; }
+  // ── Achats d'un cadeau interconnecté (sur plusieurs listes) ──
+  // Mêmes gestes que pour un cadeau classique, mais sur la collection globale « wishPurchases » :
+  // un verrou visible de toutes les listes concernées, et un détail (qui, prix) écrit à part,
+  // lisible seulement depuis la liste où l'achat a eu lieu.
+  "wish-buy": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    try {
+      // Une transaction (et non un simple lot) : la règle du document « détail » doit voir
+      // le verrou tout juste créé pour vérifier qu'on a bien le droit de l'écrire.
+      await runTransaction(db, async (tx) => {
+        tx.set(doc(db, "wishPurchases", g.id), { done: false, group: false, boughtInList: state.listId, lists: g.lists });
+        tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), { boughtBy: myUid(), boughtByName: myName(), at: serverTimestamp() });
+      });
+      toast("Noté, chut ! 🤫 Tu le retrouves dans « Mes achats ».");
+    } catch (err) {
+      toast(err.code === "permission-denied" ? "Quelqu'un vient déjà de s'en occuper !" : friendlyError(err));
     }
-    toast((await copyText(url)) ? "Lien copié ! Envoie-le à tes proches 🎄" : `Lien à partager : ${url}`, 7000);
   },
-  "settings": () => openSettingsModal(),
-  "leave-list": () => leaveList(),
-};
-
-document.addEventListener("click", (e) => {
-  const el = e.target.closest("[data-action]");
-  if (!el || !actions[el.dataset.action]) return;
-  Promise.resolve(actions[el.dataset.action](el, e)).catch((err) => toast(friendlyError(err)));
-});
-
-// ─────────────────────────────────────────────────────────────
-//  Navigation (adresse après le #) et démarrage
-// ─────────────────────────────────────────────────────────────
-function route() {
-  if (!state.user) { stopList(false); state.view = "auth"; renderAuth(); return; }
-  const h = location.hash;
-  let m;
-  if ((m = h.match(/^#\/rejoindre\/([A-Za-z0-9]+)/))) { joinFlow(m[1].toUpperCase()); return; }
-  if ((m = h.match(/^#\/liste\/([A-Za-z0-9]+)/))) { openList(m[1].toUpperCase()); return; }
-  stopList();
-  state.view = "home";
-  renderHome();
-}
-
-buildLights();
-
-if (!configured) {
-  renderSetup();
-} else {
-  window.addEventListener("hashchange", () => { closeModal(); route(); });
-  onAuthStateChanged(auth, async (user) => {
-    if (state.signup) await state.signup;   // évite d'inscrire l'email à la place du prénom
-    state.user = user;
-    if (state.unsubLists) { state.unsubLists(); state.unsubLists = null; }
-    if (!user) { stopBadges(); state.lists = []; closeModal(); route(); return; }
-
-    setDoc(doc(db, "users", user.uid), { name: myName() }, { merge: true }).catch(() => {});
-    state.unsubLists = onSnapshot(collection(db, "users", user.uid, "myLists"), (snap) => {
-      state.lists = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      syncBadges();
-      if (state.view === "home") renderHome();
-    }, () => {});
-    route();
-  });
-}
+  "wish-pool": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    try {
+      await runTransaction(db, async (tx) => {
+        tx.set(doc(db, "wishPurchases", g.id), { done: false, group: true, boughtInList: state.listId, lists: g.lists });
+        tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), { boughtBy: myUid(), boughtByName: myName(), gid: randomCode(6), at: serverTimestamp() });
+      });
+      toast("C'est lancé : les autres peuvent maintenant participer 👥");
+    } catch (err) {
+      toast(err.code === "permission-denied" ? "Quelqu'un vient déjà de s'en occuper !" : friendlyError(err));
+    }
+  },
+  "wish-join-pool": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    try {
+      await setDoc(doc(db, "wishPurchases", g.id, "detail", `join__${myUid()}`), { uid: myUid(), name: myName(), at: serverTimestamp() });
+      toast("Tu participes 🙋");
+    } catch (err) { toast(friendlyError(err)); }
+  },
+  "wish-leave-pool": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    if (el.dataset.confirm && !confirm(`Ne plus participer à « ${g.name} » ?`)) return;
+    try { await deleteDoc(doc(db, "wishPurchases", g.id, "detail", `join__${myUid()}`)); }
+    catch (err) { toast(friendlyError(err)); }
+  },
+  "wish-mark-done": (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    const lock = state.wishLocks.get(g.id);
+    openPriceModal(g, { group: !!lock?.group }, async (price) => {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "wishPurchases", g.id), { done: true });
+      batch.update(doc(db, "wishPurchases", g.id, "detail", "main"), { actualPrice: price });
+      await batch.commit();
+      toast("Bravo, c'est acheté ! 🎉");
+    });
+  },
+  "wish-undo-done": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    try { await updateDoc(doc(db, "wishPurchases", g.id), { done: false }); }
+    catch (err) { toast(friendlyError(err)); }
+  },
+  "wish-unbuy": async (el) => {
+    const g = wishById(el.dataset.id);
+    if (!g) return;
+    if (el.dataset.confirm && !confirm(`Retirer
