@@ -478,7 +478,7 @@ function openList(id) {
   state.unsubs.push(onSnapshot(query(collection(db, "wishes"), where("visibleTo", "array-contains", uid)), (s) => {
     state.wishes = s.docs.map((d) => ({ id: d.id, ...d.data() })).filter((w) => (w.lists || []).includes(id));
     renderList();
-  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
+  }, (err) => toast(friendlyError(err))));
 
   // Le « verrou » d'achat (acheté ou non) d'un cadeau interconnecté est visible de toutes
   // les listes où il apparaît (sauf son destinataire) ; qui l'a acheté ne l'est que depuis la
@@ -490,7 +490,7 @@ function openList(id) {
       if ((data.lists || []).includes(id)) state.wishLocks.set(d.id, { id: d.id, ...data });
     }
     renderList();
-  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
+  }, (err) => toast(friendlyError(err))));
   state.unsubs.push(onSnapshot(query(collectionGroup(db, "detail"), where("listMembers", "array-contains", uid)), (s) => {
     state.wishDetails = new Map();
     state.wishJoins = new Map();
@@ -507,7 +507,7 @@ function openList(id) {
       }
     }
     renderList();
-  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
+  }, (err) => toast(friendlyError(err))));
 }
 
 // Achats et idées secrètes sont rangés par destinataire. On n'écoute que ceux des AUTRES :
@@ -915,20 +915,36 @@ function myPurchaseItems() {
       items.push({ g, p, role: "joiner", done: isDone(p) });
     }
   }
+  // Cadeaux interconnectés (sur plusieurs listes) : mêmes infos, mais réparties entre le
+  // « verrou » (acheté / à plusieurs) et le « détail » (qui, prix), ce dernier n'étant visible
+  // que depuis la liste où l'achat a eu lieu.
+  for (const [wishId, lock] of state.wishLocks) {
+    const g = wishById(wishId);
+    const main = state.wishDetails.get(wishId);
+    if (!g || !main) continue;
+    const p = { boughtBy: main.boughtBy, boughtByName: main.boughtByName, group: !!lock.group, gid: main.gid, actualPrice: main.actualPrice };
+    if (main.boughtBy === me) items.push({ g, p, role: "buyer", done: !!lock.done });
+    else if (lock.group && (state.wishJoins.get(wishId) || []).some((j) => j.uid === me)) {
+      items.push({ g, p, role: "joiner", done: !!lock.done });
+    }
+  }
   return items.sort((a, b) => String(nameOf(ownerOf(a.g))).localeCompare(String(nameOf(ownerOf(b.g))), "fr"));
 }
 
 function todoRow({ g, p, role, done }) {
+  const wish = isWish(g);
   const link = normalizeUrl(g.url);
   const recipient = memberOf(ownerOf(g));
+  const joinsMap = wish ? state.wishJoins : state.joins;
   const tags = [];
   if (p.group) {
-    const others = (state.joins.get(g.id) || []).filter((j) => j.gid === p.gid).map((j) => esc(nameOf(j.uid, j.name)));
+    const others = (joinsMap.get(g.id) || []).filter((j) => wish || j.gid === p.gid).map((j) => esc(nameOf(j.uid, j.name)));
     tags.push(`<span class="tag">${role === "buyer"
       ? (others.length ? `👥 À plusieurs avec ${others.join(", ")}` : "👥 À plusieurs")
       : `👥 Organisé par ${esc(nameOf(p.boughtBy, p.boughtByName))}`}</span>`);
   }
   if (done && typeof p.actualPrice === "number") tags.push(`<span class="tag tag-price">✅ ${esc(priceFmt.format(p.actualPrice))}${p.group ? " au total" : ""}</span>`);
+  const unbuyAction = role === "joiner" ? (wish ? "wish-leave-pool" : "leave-pool") : (wish ? "wish-unbuy" : "unbuy");
   return `<div class="todo-row${done ? " is-done" : ""}">
     <input class="check" type="checkbox" data-action="toggle-done" data-id="${esc(g.id)}"${done ? " checked" : ""}${role === "joiner" ? " disabled" : ""} aria-label="Acheté : ${esc(g.name)}">
     <div class="grow todo-main">
@@ -937,7 +953,7 @@ function todoRow({ g, p, role, done }) {
       ${tagsHtml(g, tags.join(""))}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
     </div>
-    <button class="icon-btn icon-btn-small" data-action="${role === "joiner" ? "leave-pool" : "unbuy"}" data-confirm="1" data-id="${esc(g.id)}"
+    <button class="icon-btn icon-btn-small" data-action="${unbuyAction}" data-confirm="1" data-id="${esc(g.id)}"
       aria-label="${role === "joiner" ? "Ne plus participer à" : "Retirer de mes achats :"} ${esc(g.name)}" title="${role === "joiner" ? "Ne plus participer" : "Retirer de mes achats"}">✕</button>
   </div>`;
 }
@@ -1864,8 +1880,27 @@ const actions = {
   },
   // Case à cocher de « Mes achats »
   "toggle-done": (el) => {
-    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
-    if (!g || !p || p.boughtBy !== myUid()) return;
+    const g = findItem(el.dataset.id);
+    if (!g) return;
+    if (isWish(g)) {
+      const lock = state.wishLocks.get(g.id), main = state.wishDetails.get(g.id);
+      if (!lock || !main || main.boughtBy !== myUid()) return;
+      if (!lock.done) {
+        el.checked = false; // on ne coche vraiment qu'une fois le prix confirmé (ou laissé vide)
+        openPriceModal(g, { group: !!lock.group }, async (price) => {
+          const batch = writeBatch(db);
+          batch.update(doc(db, "wishPurchases", g.id), { done: true });
+          batch.update(doc(db, "wishPurchases", g.id, "detail", "main"), { actualPrice: price });
+          await batch.commit();
+          toast("Bravo, c'est acheté ! 🎉");
+        });
+        return;
+      }
+      updateDoc(doc(db, "wishPurchases", g.id), { done: false }).catch((err) => toast(friendlyError(err)));
+      return;
+    }
+    const p = state.purchases.get(g.id);
+    if (!p || p.boughtBy !== myUid()) return;
     const nowDone = !isDone(p);
     if (nowDone) {
       el.checked = false; // on ne coche vraiment qu'une fois le prix confirmé (ou laissé vide)
@@ -1897,7 +1932,9 @@ const actions = {
     try {
       // « visibleTo » et « listMembers » reprennent la visibilité du cadeau, SANS son
       // destinataire : c'est ce qui l'empêche de voir que son propre cadeau a été pris.
-      const listMembers = (g.visibleTo || []).filter((u) => u !== g.ownerId);
+      // « listMembers » = les membres de CETTE liste (pas des autres listes connectées) : c'est
+      // ce qui cache le « qui » aux autres listes. Toujours sans le destinataire du cadeau.
+      const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
       // Une transaction (et non un simple lot) : la règle du document « détail » doit voir
       // le verrou tout juste créé pour vérifier qu'on a bien le droit de l'écrire.
       await runTransaction(db, async (tx) => {
@@ -1917,7 +1954,9 @@ const actions = {
     const g = wishById(el.dataset.id);
     if (!g) return;
     try {
-      const listMembers = (g.visibleTo || []).filter((u) => u !== g.ownerId);
+      // « listMembers » = les membres de CETTE liste (pas des autres listes connectées) : c'est
+      // ce qui cache le « qui » aux autres listes. Toujours sans le destinataire du cadeau.
+      const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
       await runTransaction(db, async (tx) => {
         tx.set(doc(db, "wishPurchases", g.id), {
           done: false, group: true, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: listMembers,
@@ -1935,7 +1974,9 @@ const actions = {
     const g = wishById(el.dataset.id);
     if (!g) return;
     try {
-      const listMembers = (g.visibleTo || []).filter((u) => u !== g.ownerId);
+      // « listMembers » = les membres de CETTE liste (pas des autres listes connectées) : c'est
+      // ce qui cache le « qui » aux autres listes. Toujours sans le destinataire du cadeau.
+      const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
       await setDoc(doc(db, "wishPurchases", g.id, "detail", `join__${myUid()}`), {
         uid: myUid(), name: myName(), at: serverTimestamp(), boughtInList: state.listId, listMembers,
       });
