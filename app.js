@@ -492,6 +492,7 @@ function openList(id) {
     renderList();
   }, (err) => toast(friendlyError(err))));
   state.unsubs.push(onSnapshot(query(collectionGroup(db, "detail"), where("listMembers", "array-contains", uid)), (s) => {
+    console.log("DETAIL DOCS", s.docs.length, s.docs.map((d) => ({ path: d.ref.path, ...d.data() })));
     state.wishDetails = new Map();
     state.wishJoins = new Map();
     for (const d of s.docs) {
