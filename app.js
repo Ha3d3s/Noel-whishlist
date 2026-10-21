@@ -478,7 +478,7 @@ function openList(id) {
   state.unsubs.push(onSnapshot(query(collection(db, "wishes"), where("visibleTo", "array-contains", uid)), (s) => {
     state.wishes = s.docs.map((d) => ({ id: d.id, ...d.data() })).filter((w) => (w.lists || []).includes(id));
     renderList();
-  }, (err) => toast(friendlyError(err))));
+  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
 
   // Le « verrou » d'achat (acheté ou non) d'un cadeau interconnecté est visible de toutes
   // les listes où il apparaît (sauf son destinataire) ; qui l'a acheté ne l'est que depuis la
@@ -490,7 +490,7 @@ function openList(id) {
       if ((data.lists || []).includes(id)) state.wishLocks.set(d.id, { id: d.id, ...data });
     }
     renderList();
-  }, (err) => toast(friendlyError(err))));
+  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
   state.unsubs.push(onSnapshot(query(collectionGroup(db, "detail"), where("listMembers", "array-contains", uid)), (s) => {
     state.wishDetails = new Map();
     state.wishJoins = new Map();
@@ -507,7 +507,7 @@ function openList(id) {
       }
     }
     renderList();
-  }, (err) => toast(friendlyError(err))));
+  }, (err) => { console.error("WISH ERR", err.code, err.message); toast(friendlyError(err)); }));
 }
 
 // Achats et idées secrètes sont rangés par destinataire. On n'écoute que ceux des AUTRES :
