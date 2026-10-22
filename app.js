@@ -613,8 +613,11 @@ async function maybeMigrateLegacyWishPurchase(g) {
     const crossListVisibleTo = (g.visibleTo || []).filter((u) => u !== g.ownerId);
     const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
     await runTransaction(db, async (tx) => {
+      // La règle de création exige « done: false » (comme pour un achat tout neuf) : on migre
+      // donc toujours « non acheté » d'abord, et on repasse à « acheté » juste après si besoin
+      // (ça, la règle de MISE À JOUR l'autorise, une fois le document créé).
       tx.set(doc(db, "wishPurchases", g.id), {
-        done: !!legacy.done, group: !!legacy.group, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: crossListVisibleTo,
+        done: false, group: !!legacy.group, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: crossListVisibleTo,
       });
       const detail = {
         boughtBy: legacy.boughtBy, boughtByName: legacy.boughtByName, at: legacy.at || serverTimestamp(),
@@ -624,6 +627,7 @@ async function maybeMigrateLegacyWishPurchase(g) {
       if (typeof legacy.actualPrice === "number") detail.actualPrice = legacy.actualPrice;
       tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), detail);
     });
+    if (legacy.done) await updateDoc(doc(db, "wishPurchases", g.id), { done: true });
     await deleteDoc(doc(db, "lists", state.listId, "purchases", g.ownerId, "items", g.id)).catch(() => {});
   } catch { /* on retentera au prochain chargement de la liste si besoin */ }
 }
