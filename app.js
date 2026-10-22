@@ -9,7 +9,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, collection, collectionGroup, onSnapshot,
-  query, where, orderBy, serverTimestamp, writeBatch, runTransaction, setLogLevel,
+  query, where, orderBy, serverTimestamp, writeBatch, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -24,7 +24,6 @@ if (configured) {
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
-  setLogLevel("debug");
 }
 
 const state = {
@@ -493,7 +492,6 @@ function openList(id) {
     renderList();
   }, (err) => toast(friendlyError(err))));
   state.unsubs.push(onSnapshot(query(collectionGroup(db, "detail"), where("listMembers", "array-contains", uid)), (s) => {
-    console.log("DETAIL DOCS", s.docs.length, s.docs.map((d) => ({ path: d.ref.path, ...d.data() })));
     state.wishDetails = new Map();
     state.wishJoins = new Map();
     for (const d of s.docs) {
@@ -1316,6 +1314,16 @@ function openGiftModal({ item = null, kind = "gift", ownerUid = myUid() } = {}) 
           const visibleTo = [...new Set(rosters.flat())];
           if (wasWish) {
             await updateDoc(doc(db, "wishes", item.id), { ...data, lists: selectedLists, visibleTo, updatedAt: serverTimestamp() });
+            // Si le cadeau est déjà pris, le verrou connaît encore les ANCIENNES listes : sans
+            // ça, une liste nouvellement ajoutée ne saurait pas qu'il est déjà pris ailleurs.
+            // On ne peut jamais SAVOIR s'il y a un verrou (le destinataire ne le voit jamais,
+            // par principe) : on tente donc toujours la mise à jour, Firestore refuse juste
+            // silencieusement s'il n'y a rien à synchroniser.
+            try {
+              await updateDoc(doc(db, "wishPurchases", item.id), {
+                lists: selectedLists, visibleTo: visibleTo.filter((u) => u !== ownerUid),
+              });
+            } catch { /* pas de verrou existant : normal */ }
           } else {
             // Cadeau interconnecté pour la première fois : on le crée à part (et, si on éditait
             // un cadeau « liste unique » existant, on retire l'ancien). Un achat déjà en cours sur
@@ -1932,16 +1940,20 @@ const actions = {
     const g = wishById(el.dataset.id);
     if (!g) return;
     try {
-      // « visibleTo » et « listMembers » reprennent la visibilité du cadeau, SANS son
-      // destinataire : c'est ce qui l'empêche de voir que son propre cadeau a été pris.
-      // « listMembers » = les membres de CETTE liste (pas des autres listes connectées) : c'est
-      // ce qui cache le « qui » aux autres listes. Toujours sans le destinataire du cadeau.
+      // Le « verrou » doit être visible de TOUTES les listes où le cadeau est proposé (sauf son
+      // destinataire) : on reprend donc le « visibleTo » du souhait lui-même (qui, lui, couvre
+      // déjà tous les membres de toutes ses listes), moins le destinataire. La règle Firestore
+      // exige exactement cette égalité (wishes.visibleTo.removeAll([ownerId])).
+      const crossListVisibleTo = (g.visibleTo || []).filter((u) => u !== g.ownerId);
+      // « listMembers », lui, ne reprend QUE les membres de CETTE liste (pas des autres listes
+      // connectées) : c'est ce qui cache le « qui » aux autres listes. Toujours sans le
+      // destinataire du cadeau.
       const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
       // Une transaction (et non un simple lot) : la règle du document « détail » doit voir
       // le verrou tout juste créé pour vérifier qu'on a bien le droit de l'écrire.
       await runTransaction(db, async (tx) => {
         tx.set(doc(db, "wishPurchases", g.id), {
-          done: false, group: false, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: listMembers,
+          done: false, group: false, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: crossListVisibleTo,
         });
         tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), {
           boughtBy: myUid(), boughtByName: myName(), at: serverTimestamp(), boughtInList: state.listId, listMembers,
@@ -1956,12 +1968,14 @@ const actions = {
     const g = wishById(el.dataset.id);
     if (!g) return;
     try {
-      // « listMembers » = les membres de CETTE liste (pas des autres listes connectées) : c'est
-      // ce qui cache le « qui » aux autres listes. Toujours sans le destinataire du cadeau.
+      // Même raison que pour « wish-buy » : le verrou doit reprendre le « visibleTo » du
+      // souhait (toutes les listes), moins le destinataire ; « listMembers » reste local à
+      // cette liste pour cacher le « qui » aux autres listes.
+      const crossListVisibleTo = (g.visibleTo || []).filter((u) => u !== g.ownerId);
       const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
       await runTransaction(db, async (tx) => {
         tx.set(doc(db, "wishPurchases", g.id), {
-          done: false, group: true, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: listMembers,
+          done: false, group: true, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: crossListVisibleTo,
         });
         tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), {
           boughtBy: myUid(), boughtByName: myName(), gid: randomCode(6), at: serverTimestamp(), boughtInList: state.listId, listMembers,
