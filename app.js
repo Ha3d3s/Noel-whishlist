@@ -50,6 +50,7 @@ const state = {
   secretDocs: new Map(),   // uid -> documents d'idées / commentaires
   purchases: new Map(),    // giftId -> achat principal (jamais visible pour le destinataire)
   joins: new Map(),        // giftId -> participants à un cadeau à plusieurs
+  migratingWishes: new Set(), // cadeaux dont l'ancien achat « classique » a déjà été (tenté d')être migré
   ideas: new Map(),        // uid -> idées secrètes pour cette personne
   comments: new Map(),     // giftId / ideaId -> commentaires secrets
   thread: null,            // fil de commentaires ouvert
@@ -404,6 +405,7 @@ function stopList(saveSeen = true) {
   state.purchases = new Map(); state.joins = new Map(); state.ideas = new Map(); state.comments = new Map();
   state.questions = new Map(); state.toastedQuestions = new Set();
   state.wishes = []; state.wishLocks = new Map(); state.wishDetails = new Map(); state.wishJoins = new Map();
+  state.migratingWishes = new Set();
   state.listId = null; state.list = null; state.members = []; state.gifts = [];
   state.since = null; state.sessionStart = null; state.toastedGifts = new Set();
   state.selectedUid = null; state.thread = null; state.qthread = null; state.nameSynced = false;
@@ -477,6 +479,7 @@ function openList(id) {
   const uid = myUid();
   state.unsubs.push(onSnapshot(query(collection(db, "wishes"), where("visibleTo", "array-contains", uid)), (s) => {
     state.wishes = s.docs.map((d) => ({ id: d.id, ...d.data() })).filter((w) => (w.lists || []).includes(id));
+    checkLegacyMigrations();
     renderList();
   }, (err) => toast(friendlyError(err))));
 
@@ -566,6 +569,63 @@ function rebuildPurchases() {
     }
   }
   for (const arr of state.joins.values()) arr.sort((a, b) => ms(a.at) - ms(b.at));
+  checkLegacyMigrations();
+}
+
+// Un cadeau « classique » (une seule liste) déjà acheté, qu'on interconnecte ensuite sur une
+// 2e liste, devient un « wish » : son ancien achat (lists/{liste}/purchases/…) reste orphelin,
+// invisible pour toujours à son destinataire (par principe) et donc jamais migré par lui. On le
+// repère et on le migre ici, mais seulement depuis la liste où l'achat a eu lieu (c'est la seule
+// où l'ancien document est encore chargé), et seulement par la personne qui l'a acheté elle-même
+// (seule autorisée, par la règle, à créer le nouveau « detail/main » à son nom).
+function checkLegacyMigrations() {
+  for (const g of state.wishes) {
+    if (!(g.lists || []).includes(state.listId)) continue;
+    maybeMigrateLegacyWishPurchase(g);
+    maybeMigrateLegacyJoin(g);
+  }
+}
+
+// Idem pour chaque participant·e à un ancien achat à plusieurs : seul·e chacun·e peut migrer
+// sa propre participation (même raison : la règle n'autorise que soi-même à l'écrire).
+async function maybeMigrateLegacyJoin(g) {
+  if (!state.wishLocks.has(g.id) || state.migratingWishes.has(`${g.id}__join`)) return;
+  const legacy = (state.joins.get(g.id) || []).find((j) => j.uid === myUid());
+  if (!legacy) return;
+  const already = (state.wishJoins.get(g.id) || []).some((j) => j.id === `join__${myUid()}`);
+  if (already) return;
+  state.migratingWishes.add(`${g.id}__join`);
+  try {
+    const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
+    await setDoc(doc(db, "wishPurchases", g.id, "detail", `join__${myUid()}`), {
+      uid: myUid(), name: legacy.name, at: legacy.at || serverTimestamp(), boughtInList: state.listId, listMembers,
+    });
+    await deleteDoc(doc(db, "lists", state.listId, "purchases", g.ownerId, "items", `${g.id}__${myUid()}`)).catch(() => {});
+  } catch { /* on retentera au prochain chargement de la liste si besoin */ }
+}
+
+async function maybeMigrateLegacyWishPurchase(g) {
+  if (state.wishLocks.has(g.id) || state.migratingWishes.has(g.id)) return;
+  const legacy = state.purchases.get(g.id);
+  if (!legacy || legacy.kind !== "buy" || legacy.boughtBy !== myUid()) return;
+  state.migratingWishes.add(g.id);
+  try {
+    const crossListVisibleTo = (g.visibleTo || []).filter((u) => u !== g.ownerId);
+    const listMembers = state.members.map((m) => m.uid).filter((u) => u !== g.ownerId);
+    await runTransaction(db, async (tx) => {
+      tx.set(doc(db, "wishPurchases", g.id), {
+        done: !!legacy.done, group: !!legacy.group, boughtInList: state.listId, lists: g.lists, ownerId: g.ownerId, visibleTo: crossListVisibleTo,
+      });
+      const detail = {
+        boughtBy: legacy.boughtBy, boughtByName: legacy.boughtByName, at: legacy.at || serverTimestamp(),
+        boughtInList: state.listId, listMembers,
+      };
+      if (legacy.group) detail.gid = legacy.gid;
+      if (typeof legacy.actualPrice === "number") detail.actualPrice = legacy.actualPrice;
+      tx.set(doc(db, "wishPurchases", g.id, "detail", "main"), detail);
+    });
+    await deleteDoc(doc(db, "lists", state.listId, "purchases", g.ownerId, "items", g.id)).catch(() => {});
+  } catch { /* on retentera au prochain chargement de la liste si besoin */ }
 }
 
 function rebuildSecret() {
