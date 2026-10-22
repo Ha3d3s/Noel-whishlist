@@ -9,7 +9,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, collection, collectionGroup, onSnapshot,
-  query, where, orderBy, serverTimestamp, writeBatch, runTransaction,
+  query, where, orderBy, serverTimestamp, writeBatch, runTransaction, setLogLevel,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -24,6 +24,7 @@ if (configured) {
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
+  setLogLevel("debug");
 }
 
 const state = {
