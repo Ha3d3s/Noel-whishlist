@@ -1198,8 +1198,11 @@ function renderList() {
 function ensureChildCarnet() {
   for (const m of state.members) {
     if (!isChild(m) || !iManage(m) || state.carnetSynced.has(m.uid)) continue;
+    console.log("CARNET: tentative pour", m.uid, m.name);
     state.carnetSynced.add(m.uid);
-    setDoc(doc(db, "users", myUid(), "myChildren", m.uid), { name: m.name, createdAt: serverTimestamp() }, { merge: true }).catch(() => {});
+    setDoc(doc(db, "users", myUid(), "myChildren", m.uid), { name: m.name, createdAt: serverTimestamp() }, { merge: true })
+      .then(() => console.log("CARNET: succès pour", m.uid))
+      .catch((err) => console.error("CARNET: échec pour", m.uid, err.code, err.message));
   }
 }
 
