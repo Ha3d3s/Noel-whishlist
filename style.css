@@ -451,6 +451,14 @@ textarea.input { min-height: 84px; resize: vertical; }
 .todo-row.is-done .todo-name { text-decoration: line-through; color: var(--ink-soft); }
 .todo-row.is-done { opacity: .75; }
 
+/* ── Suivi de livraison (🚚/✅/🏬), sur un achat marqué « C'est acheté » ── */
+.delivery-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.chip-small {
+  flex: none; border: 2px solid var(--line); background: var(--paper); color: var(--ink-soft);
+  border-radius: 999px; padding: 4px 10px; font-weight: 700; font-size: .82rem;
+}
+.chip-small[aria-pressed="true"] { background: var(--pine); border-color: var(--pine); color: #fff; }
+
 /* ── Budgets ── */
 .budgets { display: grid; gap: 14px; }
 .budget-row {
@@ -465,6 +473,15 @@ textarea.input { min-height: 84px; resize: vertical; }
 .budget-bar .bar-spent { background: var(--pine); }
 .budget-bar .bar-pending { background: var(--butter); }
 .budget-detail { margin: 0; }
+.budget-figures { display: flex; flex-wrap: wrap; gap: 10px; }
+.budget-figure {
+  flex: 1 1 120px; display: grid; gap: 1px;
+  background: var(--snow); border-radius: 12px; padding: 7px 11px;
+}
+.budget-figure-label { font-size: .78rem; font-weight: 600; color: var(--ink-soft); }
+.budget-figure-amount { font-family: var(--font-display); font-weight: 800; font-size: 1.2rem; }
+.budget-figure-spent .budget-figure-amount { color: var(--pine); }
+.budget-figure-pending .budget-figure-amount { color: #4a3a05; }
 .check { width: 28px; height: 28px; margin: 2px 0 0; flex: none; accent-color: var(--pine); cursor: pointer; }
 .check:disabled { cursor: default; opacity: .5; }
 .opt .grow { min-width: 0; overflow-wrap: anywhere; }

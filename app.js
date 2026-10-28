@@ -1072,7 +1072,7 @@ function myPurchaseItems() {
     const g = wishById(wishId);
     const main = state.wishDetails.get(wishId);
     if (!g || !main) continue;
-    const p = { boughtBy: main.boughtBy, boughtByName: main.boughtByName, group: !!lock.group, gid: main.gid, actualPrice: main.actualPrice };
+    const p = { boughtBy: main.boughtBy, boughtByName: main.boughtByName, group: !!lock.group, gid: main.gid, actualPrice: main.actualPrice, delivery: main.delivery };
     if (main.boughtBy === me) items.push({ g, p, role: "buyer", done: !!lock.done });
     else if (lock.group && (state.wishJoins.get(wishId) || []).some((j) => j.uid === me)) {
       items.push({ g, p, role: "joiner", done: !!lock.done });
@@ -1080,6 +1080,14 @@ function myPurchaseItems() {
   }
   return items.sort((a, b) => String(nameOf(ownerOf(a.g))).localeCompare(String(nameOf(ownerOf(b.g))), "fr"));
 }
+
+// Suivi de livraison : propre à l'acheteur·se (comme le prix réel payé), visible seulement par
+// toi, et seulement une fois le cadeau marqué « C'est acheté ».
+const DELIVERY = {
+  shipping: { label: "En livraison", emoji: "🚚" },
+  received: { label: "Reçu", emoji: "✅" },
+  store: { label: "Acheté en magasin", emoji: "🏬" },
+};
 
 function todoRow({ g, p, role, done }) {
   const wish = isWish(g);
@@ -1095,6 +1103,8 @@ function todoRow({ g, p, role, done }) {
   }
   if (done && typeof p.actualPrice === "number") tags.push(`<span class="tag tag-price">✅ ${esc(priceFmt.format(p.actualPrice))}${p.group ? " au total" : ""}</span>`);
   const unbuyAction = role === "joiner" ? (wish ? "wish-leave-pool" : "leave-pool") : (wish ? "wish-unbuy" : "unbuy");
+  const showDelivery = done && role === "buyer";
+  const deliveryAction = wish ? "wish-set-delivery" : "set-delivery";
   return `<div class="todo-row${done ? " is-done" : ""}">
     <input class="check" type="checkbox" data-action="toggle-done" data-id="${esc(g.id)}"${done ? " checked" : ""}${role === "joiner" ? " disabled" : ""} aria-label="Acheté : ${esc(g.name)}">
     <div class="grow todo-main">
@@ -1102,6 +1112,9 @@ function todoRow({ g, p, role, done }) {
       <div class="muted small">pour ${isChild(recipient) ? "🧸 " : ""}${esc(nameOf(ownerOf(g)))}</div>
       ${tagsHtml(g, tags.join(""))}
       ${link ? `<a class="gift-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(hostOf(link))}</a>` : ""}
+      ${showDelivery ? `<div class="delivery-row">${Object.entries(DELIVERY).map(([id, d]) => `
+        <button type="button" class="chip chip-small" data-action="${deliveryAction}" data-id="${esc(g.id)}" data-value="${id}" aria-pressed="${p.delivery === id}">${d.emoji} ${d.label}</button>`).join("")}
+      </div>` : ""}
     </div>
     <button class="icon-btn icon-btn-small" data-action="${unbuyAction}" data-confirm="1" data-id="${esc(g.id)}"
       aria-label="${role === "joiner" ? "Ne plus participer à" : "Retirer de mes achats :"} ${esc(g.name)}" title="${role === "joiner" ? "Ne plus participer" : "Retirer de mes achats"}">✕</button>
@@ -1154,11 +1167,20 @@ function budgetRow(t, max) {
       <span class="budget-name">${esc(t.name)}</span>
       <span class="budget-total">${esc(priceFmt.format(total))}</span>
     </div>
-    <div class="progress budget-bar" role="img" aria-label="${esc(priceFmt.format(t.spent))} dépensés${t.pending ? `, ${esc(priceFmt.format(t.pending))} estimés en cours` : ""}">
+    <div class="progress budget-bar" role="img" aria-label="${esc(priceFmt.format(t.spent))} déjà payés${t.pending ? `, ${esc(priceFmt.format(t.pending))} estimés restants` : ""}">
       ${t.spent ? `<div class="bar bar-spent" style="width:${pctSpent}%"></div>` : ""}
       ${t.pending ? `<div class="bar bar-pending" style="width:${pctPending}%;left:${pctSpent}%"></div>` : ""}
     </div>
-    <p class="muted small budget-detail">${t.spent ? `✅ ${esc(priceFmt.format(t.spent))} dépensés` : "Rien d'acheté pour l'instant"}${t.pending ? ` · 🛍️ ≈ ${esc(priceFmt.format(t.pending))} en cours` : ""}</p>
+    <div class="budget-figures">
+      <div class="budget-figure budget-figure-spent">
+        <span class="budget-figure-label">✅ Déjà payé</span>
+        <span class="budget-figure-amount">${esc(priceFmt.format(t.spent))}</span>
+      </div>
+      ${t.pending ? `<div class="budget-figure budget-figure-pending">
+        <span class="budget-figure-label">🛍️ Reste à payer</span>
+        <span class="budget-figure-amount">≈ ${esc(priceFmt.format(t.pending))}</span>
+      </div>` : ""}
+    </div>
   </div>`;
 }
 
@@ -1174,7 +1196,7 @@ function budgetHtml() {
   const grandPending = rows.reduce((s, t) => s + t.pending, 0);
   return `<div class="section-head"><h2>💰 Mon budget</h2></div>
     <p class="hint">Ce que TOI tu as dépensé (ou comptes dépenser) pour chaque personne, cadeaux à plusieurs comptés pour ta part seulement.</p>
-    <p class="hint">Total : ${esc(priceFmt.format(grandSpent))} dépensés${grandPending ? ` · ≈ ${esc(priceFmt.format(grandPending))} en cours` : ""}</p>
+    <p class="hint">Total : ✅ ${esc(priceFmt.format(grandSpent))} déjà payés${grandPending ? ` · 🛍️ ≈ ${esc(priceFmt.format(grandPending))} restants` : ""}</p>
     <div class="budgets">${rows.map((t) => budgetRow(t, max)).join("")}</div>`;
 }
 
@@ -2188,6 +2210,19 @@ const actions = {
     const g = findItem(el.dataset.id);
     if (!g) return;
     try { await updateDoc(purchaseRef(g), { done: false }); }
+    catch (err) { toast(friendlyError(err)); }
+  },
+  // Suivi de livraison (🚚 / ✅ / 🏬) : propre à chacun, re-cliquer le statut déjà choisi l'efface.
+  "set-delivery": async (el) => {
+    const g = findItem(el.dataset.id), p = g && state.purchases.get(g.id);
+    if (!g) return;
+    try { await updateDoc(purchaseRef(g), { delivery: p?.delivery === el.dataset.value ? null : el.dataset.value }); }
+    catch (err) { toast(friendlyError(err)); }
+  },
+  "wish-set-delivery": async (el) => {
+    const g = wishById(el.dataset.id), main = state.wishDetails.get(el.dataset.id);
+    if (!g) return;
+    try { await updateDoc(doc(db, "wishPurchases", g.id, "detail", "main"), { delivery: main?.delivery === el.dataset.value ? null : el.dataset.value }); }
     catch (err) { toast(friendlyError(err)); }
   },
   // Case à cocher de « Mes achats »
